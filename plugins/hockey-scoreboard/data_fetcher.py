@@ -23,7 +23,8 @@ class HockeyDataFetcher:
     ESPN_API_BASE_URLS = {
         'nhl': 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard',
         'ncaa_mens': 'https://site.api.espn.com/apis/site/v2/sports/hockey/mens-college-hockey/scoreboard',
-        'ncaa_womens': 'https://site.api.espn.com/apis/site/v2/sports/hockey/womens-college-hockey/scoreboard'
+        'ncaa_womens': 'https://site.api.espn.com/apis/site/v2/sports/hockey/womens-college-hockey/scoreboard',
+        'pwhl': 'https://lscluster.hockeytech.com/feed/index.php'
     }
     
     def __init__(self, cache_manager, logger: logging.Logger):
@@ -68,6 +69,10 @@ class HockeyDataFetcher:
             # NCAA 2025-26 season: October 2025 to March 2026
             season_start = datetime(2025, 10, 1)
             season_end = datetime(2026, 3, 31)
+        elif league_key == 'pwhl':
+            # PWHL season: November to May
+            season_start = datetime(2025, 11, 1)
+            season_end = datetime(2026, 5, 31)
         else:
             # Default to 2025-26 season
             season_start = datetime(2025, 10, 1)
