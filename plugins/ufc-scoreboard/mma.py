@@ -154,8 +154,8 @@ class MMA(SportsCore):
                 if logo.mode != "RGBA":
                     logo = logo.convert("RGBA")
 
-                max_width = int(self.display_width * 1.5)
-                max_height = int(self.display_height * 1.5)
+                max_width = int(self.display_width * 0.3)
+                max_height = self.display_height
                 logo.thumbnail((max_width, max_height), LANCZOS)
                 logo.load()  # Ensure pixel data is loaded before closing file
             self._logo_cache[fighter_id] = logo
@@ -372,15 +372,13 @@ class MMARecent(MMA, SportsRecent):
             home_x = (
                 self.display_width
                 - fighter1_image.width
-                + fighter1_image.width // 4
-                + 2
                 + self._get_layout_offset("fighter1_image", "x_offset")
             )
             home_y = center_y - (fighter1_image.height // 2) + self._get_layout_offset("fighter1_image", "y_offset")
             main_img.paste(fighter1_image, (home_x, home_y), fighter1_image)
 
             # Fighter 2 (left side) headshot position
-            away_x = -2 - fighter2_image.width // 4 + self._get_layout_offset("fighter2_image", "x_offset")
+            away_x = 0 + self._get_layout_offset("fighter2_image", "x_offset")
             away_y = center_y - (fighter2_image.height // 2) + self._get_layout_offset("fighter2_image", "y_offset")
             main_img.paste(fighter2_image, (away_x, away_y), fighter2_image)
 
@@ -648,8 +646,6 @@ class MMAUpcoming(MMA, SportsUpcoming):
             home_x = (
                 self.display_width
                 - fighter1_image.width
-                + fighter1_image.width // 4
-                + 2
                 + self._get_layout_offset("fighter1_image", "x_offset")
             )
             home_y = center_y - (fighter1_image.height // 2) + self._get_layout_offset("fighter1_image", "y_offset")
@@ -664,7 +660,7 @@ class MMAUpcoming(MMA, SportsUpcoming):
             )
 
             # Fighter 2 (left side) headshot position
-            away_x = -2 - fighter2_image.width // 4 + self._get_layout_offset("fighter2_image", "x_offset")
+            away_x = 0 + self._get_layout_offset("fighter2_image", "x_offset")
             away_y = center_y - (fighter2_image.height // 2) + self._get_layout_offset("fighter2_image", "y_offset")
             main_img.paste(fighter2_image, (away_x, away_y), fighter2_image)
 
@@ -937,14 +933,14 @@ class MMALive(MMA, SportsLive):
 
             # Fighter 1 (right side) headshot with layout offsets
             home_x = (
-                self.display_width - fighter1_image.width + 10
+                self.display_width - fighter1_image.width
                 + self._get_layout_offset("fighter1_image", "x_offset")
             )
             home_y = center_y - (fighter1_image.height // 2) + self._get_layout_offset("fighter1_image", "y_offset")
             main_img.paste(fighter1_image, (home_x, home_y), fighter1_image)
 
             # Fighter 2 (left side) headshot with layout offsets
-            away_x = -10 + self._get_layout_offset("fighter2_image", "x_offset")
+            away_x = 0 + self._get_layout_offset("fighter2_image", "x_offset")
             away_y = center_y - (fighter2_image.height // 2) + self._get_layout_offset("fighter2_image", "y_offset")
             main_img.paste(fighter2_image, (away_x, away_y), fighter2_image)
 

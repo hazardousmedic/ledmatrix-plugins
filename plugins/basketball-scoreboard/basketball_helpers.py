@@ -74,8 +74,8 @@ class BasketballHelpers:
                 logo = logo.convert('RGBA')
             
             # Resize to fit display
-            max_width = int(self.display_width * 1.5)
-            max_height = int(self.display_height * 1.5)
+            max_width = int(self.display_width * 0.3)
+            max_height = self.display_height
             logo.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
             
             # Cache the logo

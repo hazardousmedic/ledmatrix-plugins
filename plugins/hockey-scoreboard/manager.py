@@ -2490,7 +2490,25 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
         
         # Create display mode name for tracking
         display_mode = f"{league}_{mode_type}"
-        
+
+        # Ensure manager has fresh data before checking content
+        self._ensure_manager_updated(manager)
+
+        # For live modes, skip if there are no live games after data fetch.
+        # Live managers use synchronous _fetch_todays_games(), so empty data
+        # means genuinely no live games — skip to avoid a blank screen.
+        # Recent/upcoming modes use async background fetch and may have empty
+        # games_list while data is still loading — don't skip those.
+        if mode_type == 'live':
+            games = getattr(manager, 'live_games', None)
+            if not games:
+                games = getattr(manager, 'games_list', None)
+            if not games:
+                self.logger.debug(
+                    f"No live games for {league}, skipping {display_mode}"
+                )
+                return False
+
         # Check if this league uses scroll mode
         if self._should_use_scroll_mode(league, mode_type):
             return self._display_scroll_mode(display_mode, league, mode_type, force_clear)
@@ -2799,16 +2817,16 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
         else:
             # Result is None or other - assume success (backward compatibility)
             manager_key = self._build_manager_key(actual_mode, manager)
-            
+
             try:
                 self._record_dynamic_progress(manager, actual_mode=actual_mode, display_mode=display_mode)
             except Exception as progress_err:  # pylint: disable=broad-except
                 self.logger.debug(f"Dynamic progress tracking failed: {progress_err}")
-            
+
             # Track which managers were used for this display mode
             if display_mode:
                 self._display_mode_to_managers.setdefault(display_mode, set()).add(manager_key)
-            
+
             self._evaluate_dynamic_cycle_completion(display_mode=display_mode)
             return True, actual_mode
 

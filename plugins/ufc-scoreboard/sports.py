@@ -545,8 +545,8 @@ class SportsCore(ABC):
             if logo.mode != "RGBA":
                 logo = logo.convert("RGBA")
 
-            max_width = int(self.display_width * 1.5)
-            max_height = int(self.display_height * 1.5)
+            max_width = int(self.display_width * 0.3)
+            max_height = self.display_height
             logo.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
             self._logo_cache[team_abbrev] = logo
             return logo
@@ -1259,11 +1259,11 @@ class SportsUpcoming(SportsCore):
             center_y = display_height // 2
 
             # MLB-style logo positions with layout offsets
-            home_x = display_width - home_logo.width + 2 + self._get_layout_offset('home_logo', 'x_offset')
+            home_x = display_width - home_logo.width + self._get_layout_offset('home_logo', 'x_offset')
             home_y = center_y - (home_logo.height // 2) + self._get_layout_offset('home_logo', 'y_offset')
             main_img.paste(home_logo, (home_x, home_y), home_logo)
 
-            away_x = -2 + self._get_layout_offset('away_logo', 'x_offset')
+            away_x = 0 + self._get_layout_offset('away_logo', 'x_offset')
             away_y = center_y - (away_logo.height // 2) + self._get_layout_offset('away_logo', 'y_offset')
             main_img.paste(away_logo, (away_x, away_y), away_logo)
 
@@ -1820,11 +1820,11 @@ class SportsRecent(SportsCore):
             center_y = display_height // 2
 
             # MLB-style logo positioning (closer to edges) with layout offsets
-            home_x = display_width - home_logo.width + 2 + self._get_layout_offset('home_logo', 'x_offset')
+            home_x = display_width - home_logo.width + self._get_layout_offset('home_logo', 'x_offset')
             home_y = center_y - (home_logo.height // 2) + self._get_layout_offset('home_logo', 'y_offset')
             main_img.paste(home_logo, (home_x, home_y), home_logo)
 
-            away_x = -2 + self._get_layout_offset('away_logo', 'x_offset')
+            away_x = 0 + self._get_layout_offset('away_logo', 'x_offset')
             away_y = center_y - (away_logo.height // 2) + self._get_layout_offset('away_logo', 'y_offset')
             main_img.paste(away_logo, (away_x, away_y), away_logo)
 
