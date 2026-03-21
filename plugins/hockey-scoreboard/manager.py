@@ -2649,20 +2649,11 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
             return False, None
         
         else:
-            # Result is None or other - assume success
-            manager_key = self._build_manager_key(actual_mode, manager)
-            
-            try:
-                self._record_dynamic_progress(manager, actual_mode=actual_mode, display_mode=display_mode)
-            except Exception as progress_err:  # pylint: disable=broad-except
-                self.logger.debug(f"Dynamic progress tracking failed: {progress_err}")
-            
-            # Track which managers were used for this display mode
-            if display_mode:
-                self._display_mode_to_managers.setdefault(display_mode, set()).add(manager_key)
-            
-            self._evaluate_dynamic_cycle_completion(display_mode=display_mode)
-            return True, actual_mode
+            # Result is None or other - treat as no content (same as False)
+            self.logger.debug(
+                f"Manager {manager_class_name} returned {result} (no content), treating as False"
+            )
+            return False, None
 
     def _get_effective_mode_duration(self, display_mode: str, mode_type: str) -> Optional[float]:
         """
@@ -2702,7 +2693,21 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
             return False
 
     def get_display_duration(self) -> float:
-        """Get the display duration for this plugin."""
+        """Get the display duration for the current mode.
+
+        When dynamic duration is disabled, returns the total time needed to
+        show all games (num_games × per_game_duration) so the display
+        controller allocates enough time for every game.
+
+        When dynamic duration is enabled, returns the per-game duration so
+        the display controller uses it as min_duration and relies on
+        get_cycle_duration() for the actual target.
+        """
+        if self.modes and not self.supports_dynamic_duration():
+            current_mode = self.modes[self.current_mode_index]
+            cycle = self.get_cycle_duration(current_mode)
+            if cycle is not None and cycle > 0:
+                return float(cycle)
         return float(self.display_duration)
 
     def get_cycle_duration(self, display_mode: str = None) -> Optional[float]:

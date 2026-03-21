@@ -201,7 +201,7 @@ class SportsCore(ABC):
                     f"No game data available to display in {self.__class__.__name__}"
                 )
                 setattr(self, "_last_warning_time", current_time)
-            return
+            return False
 
         try:
             self._draw_scorebug_layout(self.current_game, force_clear)
@@ -1378,7 +1378,7 @@ class SportsUpcoming(SportsCore):
                     "No upcoming games found for favorite teams to display."
                 )  # Changed log prefix
                 self.last_warning_time = current_time
-            return  # Skip display update
+            return False  # Skip display update
 
         try:
             current_time = time.time()
@@ -1867,7 +1867,7 @@ class SportsRecent(SportsCore):
                 self.display_manager.update_display()
             if not self.games_list and self.current_game:
                 self.current_game = None  # Clear internal state if list becomes empty
-            return
+            return False
 
         try:
             current_time = time.time()
