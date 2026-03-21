@@ -179,6 +179,21 @@ class GameRenderer:
             home_x = (self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
             main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
 
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = self.display_height - team_font_h - 1
+
+            away_abbr_text = game.get('away_abbr', '')
+            away_abbr_w = draw.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = game.get('home_abbr', '')
+            home_abbr_w = draw.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw, home_abbr_text, (home_abbr_x, abbr_y), team_font)
+
             # Inning indicator (top center)
             inning_half = game.get('inning_half', 'top')
             inning_num = game.get('inning', 1)
@@ -323,6 +338,21 @@ class GameRenderer:
             home_x = (self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
             main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
 
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = self.display_height - team_font_h - 1
+
+            away_abbr_text = game.get('away_abbr', '')
+            away_abbr_w = draw.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = game.get('home_abbr', '')
+            home_abbr_w = draw.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw, home_abbr_text, (home_abbr_x, abbr_y), team_font)
+
             # "Final" (top center)
             status_text = "Final"
             status_width = draw.textlength(status_text, font=self.fonts['time'])
@@ -371,6 +401,21 @@ class GameRenderer:
             main_img.paste(away_logo, (away_x, center_y - away_logo.height // 2), away_logo)
             home_x = (self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
             main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = self.display_height - team_font_h - 1
+
+            away_abbr_text = game.get('away_abbr', '')
+            away_abbr_w = draw.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = game.get('home_abbr', '')
+            home_abbr_w = draw.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw, home_abbr_text, (home_abbr_x, abbr_y), team_font)
 
             # "Next Game" (top center)
             status_font = self.fonts['status'] if self.display_width <= 128 else self.fonts['time']

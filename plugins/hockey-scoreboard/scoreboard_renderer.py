@@ -70,8 +70,8 @@ class HockeyScoreboardRenderer:
                 logo = logo.convert('RGBA')
             
             # Resize logo to fit display
-            max_width = int(self.display_manager.matrix.width * 1.5)
-            max_height = int(self.display_manager.matrix.height * 1.5)
+            max_width = int(self.display_manager.matrix.width * 0.3)
+            max_height = self.display_manager.matrix.height
             logo.thumbnail((max_width, max_height), RESAMPLE_FILTER)
             
             self._logo_cache[team_abbrev] = logo
@@ -128,14 +128,29 @@ class HockeyScoreboardRenderer:
             center_y = matrix_height // 2
             
             # Draw logos (matching NHL manager positioning)
-            home_x = matrix_width - home_logo.width + 10  # adjusted from 18
+            home_x = matrix_width - home_logo.width
             home_y = center_y - (home_logo.height // 2)
             main_img.paste(home_logo, (home_x, home_y), home_logo)
-            
-            away_x = -10  # adjusted from 18
+
+            away_x = 0
             away_y = center_y - (away_logo.height // 2)
             main_img.paste(away_logo, (away_x, away_y), away_logo)
-            
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = matrix_height - team_font_h - 1
+
+            away_abbr_text = away_team.get('abbrev', '')
+            away_abbr_w = draw_overlay.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = home_team.get('abbrev', '')
+            home_abbr_w = draw_overlay.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, home_abbr_text, (home_abbr_x, abbr_y), team_font)
+
             # Draw period and clock (matching NHL manager)
             status = game.get('status', {})
             period = status.get('period', 0)
@@ -227,14 +242,29 @@ class HockeyScoreboardRenderer:
             center_y = matrix_height // 2
             
             # Draw logos (matching NHL manager positioning)
-            home_x = matrix_width - home_logo.width + 10  # adjusted from 18
+            home_x = matrix_width - home_logo.width
             home_y = center_y - (home_logo.height // 2)
             main_img.paste(home_logo, (home_x, home_y), home_logo)
-            
-            away_x = -10  # adjusted from 18
+
+            away_x = 0
             away_y = center_y - (away_logo.height // 2)
             main_img.paste(away_logo, (away_x, away_y), away_logo)
-            
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = matrix_height - team_font_h - 1
+
+            away_abbr_text = away_team.get('abbrev', '')
+            away_abbr_w = draw_overlay.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = home_team.get('abbrev', '')
+            home_abbr_w = draw_overlay.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, home_abbr_text, (home_abbr_x, abbr_y), team_font)
+
             # Draw "Final" status (matching NHL manager)
             status_text = "Final"
             status_width = draw_overlay.textlength(status_text, font=self.fonts['time'])
@@ -302,14 +332,29 @@ class HockeyScoreboardRenderer:
             center_y = matrix_height // 2
             
             # Draw logos (matching SportsUpcoming positioning - MLB-style)
-            home_x = matrix_width - home_logo.width + 2  # SportsUpcoming style
+            home_x = matrix_width - home_logo.width
             home_y = center_y - (home_logo.height // 2)
             main_img.paste(home_logo, (home_x, home_y), home_logo)
-            
-            away_x = -2  # SportsUpcoming style
+
+            away_x = 0
             away_y = center_y - (away_logo.height // 2)
             main_img.paste(away_logo, (away_x, away_y), away_logo)
-            
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = matrix_height - team_font_h - 1
+
+            away_abbr_text = away_team.get('abbrev', '')
+            away_abbr_w = draw_overlay.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = home_team.get('abbrev', '')
+            home_abbr_w = draw_overlay.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, home_abbr_text, (home_abbr_x, abbr_y), team_font)
+
             # Draw "Next Game" at the top (matching SportsUpcoming)
             status_font = self.fonts['status']
             if matrix_width > 128:
