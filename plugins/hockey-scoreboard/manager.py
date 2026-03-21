@@ -2360,15 +2360,33 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
         
         # Create display mode name for tracking
         display_mode = f"{league}_{mode_type}"
-        
+
+        # Ensure manager has fresh data before checking content
+        self._ensure_manager_updated(manager)
+
+        # For live modes, skip if there are no live games after data fetch.
+        # Live managers use synchronous _fetch_todays_games(), so empty data
+        # means genuinely no live games — skip to avoid a blank screen.
+        # Recent/upcoming modes use async background fetch and may have empty
+        # games_list while data is still loading — don't skip those.
+        if mode_type == 'live':
+            games = getattr(manager, 'live_games', None)
+            if not games:
+                games = getattr(manager, 'games_list', None)
+            if not games:
+                self.logger.debug(
+                    f"No live games for {league}, skipping {display_mode}"
+                )
+                return False
+
         # Check if this league uses scroll mode
         if self._should_use_scroll_mode(league, mode_type):
             return self._display_scroll_mode(display_mode, league, mode_type, force_clear)
-        
+
         # Set display context for dynamic duration tracking
         self._current_display_league = league
         self._current_display_mode_type = mode_type
-        
+
         # Try to display content from this league's manager (switch mode)
         success, _ = self._try_manager_display(
             manager, force_clear, display_mode, mode_type, None
@@ -2649,11 +2667,20 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
             return False, None
         
         else:
-            # Result is None or other - treat as no content (same as False)
-            self.logger.debug(
-                f"Manager {manager_class_name} returned {result} (no content), treating as False"
-            )
-            return False, None
+            # Result is None or other - assume success (backward compatibility)
+            manager_key = self._build_manager_key(actual_mode, manager)
+
+            try:
+                self._record_dynamic_progress(manager, actual_mode=actual_mode, display_mode=display_mode)
+            except Exception as progress_err:  # pylint: disable=broad-except
+                self.logger.debug(f"Dynamic progress tracking failed: {progress_err}")
+
+            # Track which managers were used for this display mode
+            if display_mode:
+                self._display_mode_to_managers.setdefault(display_mode, set()).add(manager_key)
+
+            self._evaluate_dynamic_cycle_completion(display_mode=display_mode)
+            return True, actual_mode
 
     def _get_effective_mode_duration(self, display_mode: str, mode_type: str) -> Optional[float]:
         """
@@ -2899,6 +2926,15 @@ class HockeyScoreboardPlugin(BasePlugin if BasePlugin else object):
                 default_duration = 45.0  # 3 games × 15s per game (reasonable default)
                 self.logger.info(f"get_cycle_duration: {display_mode} has no games yet, returning default {default_duration}s")
                 return default_duration
+
+            # Subtract a small guard interval so the display controller exits
+            # the loop just before the plugin's internal game timer cycles back
+            # to game 1. Without this, the game timer and mode timer fire at the
+            # exact same boundary (e.g., 75s for 5×15s), and because display()
+            # is called before the elapsed check, the plugin renders game 1 again
+            # for one frame before the mode switches — causing a visible flash.
+            guard_interval = 0.5
+            total_duration = max(total_duration - guard_interval, total_duration / 2)
 
             self.logger.info(
                 f"get_cycle_duration({display_mode}): {total_games} total games = {total_duration}s"
