@@ -379,6 +379,19 @@ class GameRenderer:
         home_y = center_y - (home_logo.height // 2)
         main_img.paste(home_logo, (home_x, home_y), home_logo)
 
+        # Draw team abbreviations along bottom edge, centered within each logo
+        team_font = self.fonts.get('team', self.fonts['status'])
+        team_font_h = team_font.getbbox("A")[3]
+        abbr_y = self.display_height - team_font_h - 1
+
+        away_abbr_w = draw_overlay.textlength(away_abbr, font=team_font)
+        away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+        self._draw_text_with_outline(draw_overlay, away_abbr, (away_abbr_x, abbr_y), team_font)
+
+        home_abbr_w = draw_overlay.textlength(home_abbr, font=team_font)
+        home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+        self._draw_text_with_outline(draw_overlay, home_abbr, (home_abbr_x, abbr_y), team_font)
+
         # Draw scores (centered) - only for live and recent games
         if game_type in ("live", "recent"):
             home_score = str(home_team.get("score", "0"))

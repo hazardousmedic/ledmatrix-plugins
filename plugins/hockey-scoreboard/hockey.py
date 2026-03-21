@@ -208,14 +208,29 @@ class HockeyLive(Hockey, SportsLive):
 
             # Draw logos (shifted slightly more inward than NHL perhaps) with layout offsets
             home_x = (
-                self.display_width - home_logo.width + 10 + self._get_layout_offset('home_logo', 'x_offset')
-            )  # adjusted from 18 # Adjust position as needed
+                self.display_width - home_logo.width + self._get_layout_offset('home_logo', 'x_offset')
+            )
             home_y = center_y - (home_logo.height // 2) + self._get_layout_offset('home_logo', 'y_offset')
             main_img.paste(home_logo, (home_x, home_y), home_logo)
 
-            away_x = -10 + self._get_layout_offset('away_logo', 'x_offset')  # adjusted from 18 # Adjust position as needed
+            away_x = 0 + self._get_layout_offset('away_logo', 'x_offset')
             away_y = center_y - (away_logo.height // 2) + self._get_layout_offset('away_logo', 'y_offset')
             main_img.paste(away_logo, (away_x, away_y), away_logo)
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = self.display_height - team_font_h - 1
+
+            away_abbr_text = game.get("away_abbr", "")
+            away_abbr_w = draw_overlay.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = game.get("home_abbr", "")
+            home_abbr_w = draw_overlay.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, home_abbr_text, (home_abbr_x, abbr_y), team_font)
 
             # --- Draw Text Elements on Overlay ---
             # Note: Rankings are now handled in the records/rankings section below

@@ -212,8 +212,8 @@ class SportsCore(ABC):
                 logo = logo.convert('RGBA')
             
             # Resize logo to fit display
-            max_width = int(self.display_width * 1.5)
-            max_height = int(self.display_height * 1.5)
+            max_width = int(self.display_width * 0.3)
+            max_height = self.display_height
             logo.thumbnail((max_width, max_height), RESAMPLE_FILTER)
             
             self._logo_cache[team_abbrev] = logo
@@ -468,13 +468,28 @@ class HockeyLive(Hockey):
             center_y = self.display_height // 2
 
             # Draw logos
-            home_x = self.display_width - home_logo.width + 10
+            home_x = self.display_width - home_logo.width
             home_y = center_y - (home_logo.height // 2)
             main_img.paste(home_logo, (home_x, home_y), home_logo)
 
-            away_x = -10
+            away_x = 0
             away_y = center_y - (away_logo.height // 2)
             main_img.paste(away_logo, (away_x, away_y), away_logo)
+
+            # Draw team abbreviations along bottom edge, centered within each logo
+            team_font = self.fonts.get('team', self.fonts['status'])
+            team_font_h = team_font.getbbox("A")[3]
+            abbr_y = self.display_height - team_font_h - 1
+
+            away_abbr_text = game.get("away_abbr", "")
+            away_abbr_w = draw_overlay.textlength(away_abbr_text, font=team_font)
+            away_abbr_x = away_x + (away_logo.width - away_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, away_abbr_text, (away_abbr_x, abbr_y), team_font)
+
+            home_abbr_text = game.get("home_abbr", "")
+            home_abbr_w = draw_overlay.textlength(home_abbr_text, font=team_font)
+            home_abbr_x = home_x + (home_logo.width - home_abbr_w) // 2
+            self._draw_text_with_outline(draw_overlay, home_abbr_text, (home_abbr_x, abbr_y), team_font)
 
             # Period/Quarter and Clock (Top center)
             period_clock_text = f"{game.get('period_text', '')} {game.get('clock', '')}".strip()
