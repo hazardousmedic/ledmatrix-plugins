@@ -29,7 +29,7 @@ from aircraft_database import AircraftDatabase
 
 # Import extracted utility modules
 from utils import haversine_miles, altitude_to_color, categorize_aircraft, is_callsign_worth_fetching
-from units import null_safe
+from units import null_safe, format_distance
 from fetcher import create_fetcher, FR24DetailFetcher, _AIRLINE_ICAO_NAMES as AIRLINE_ICAO_NAMES_TABLE
 from enrichment import create_enrichment_provider
 from renderer import FlightRenderer
@@ -47,29 +47,30 @@ class FlightTrackerPlugin(BasePlugin):
         super().__init__(plugin_id, config, display_manager, cache_manager, plugin_manager)
         self.plugin_manager = plugin_manager
         
-        # Config is already flattened (no flight_tracker wrapper)
+        # Normalize FlightAware config: copy nested keys to flat so enrichment
+        # modules and legacy code paths both work
+        self._normalize_flightaware_config(self.config)
+
         # Flight tracker configuration
         self.enabled = self.config.get('enabled', False)
         self.update_interval = self.config.get('update_interval', 5)
         self.skyaware_url = self.config.get('skyaware_url', 'http://192.168.86.30/skyaware/data/aircraft.json')
-        
-        # Flight plan data configuration
-        self.flight_plan_enabled = self.config.get('flight_plan_enabled', False)
-        
-        # Get API key from flight_tracker config (secrets are merged by ConfigManager)
-        self.flightaware_api_key = self.config.get('flightaware_api_key', '')
-        
+
+        # FlightAware config (nested under 'flightaware' with flat fallback for backward compat)
+        self.flight_plan_enabled = self._fa_config('enabled', False)
+        self.flightaware_api_key = self._fa_config('api_key', '')
+
         # Rate limiting and cost control for FlightAware API
         self.api_call_timestamps = []  # Track API call timestamps for rate limiting
-        self.max_api_calls_per_hour = self.config.get('max_api_calls_per_hour', 20)  # Reduced from 50 to 20 for cost control
-        self.cache_ttl_seconds = self.config.get('flight_plan_cache_ttl_hours', 12) * 3600  # 12 hours for fresher data
-        self.min_callsign_length = self.config.get('min_callsign_length', 4)  # Increased from 3 to 4 to filter more
-        self.daily_api_budget = self.config.get('daily_api_budget', 60)  # Max 60 calls per day (1800/month)
+        self.max_api_calls_per_hour = self._fa_config('max_api_calls_per_hour', 20)
+        self.cache_ttl_seconds = self._fa_config('cache_ttl_hours', 12) * 3600
+        self.min_callsign_length = self._fa_config('min_callsign_length', 4)
+        self.daily_api_budget = self._fa_config('daily_api_budget', 60)
         self.api_calls_today = 0
         self.last_reset_date = None
-        self.airline_callsign_prefixes = self.config.get('airline_callsign_prefixes', [
+        self.airline_callsign_prefixes = self._fa_config('airline_callsign_prefixes', [
             'AAL', 'UAL', 'DAL', 'SWA', 'JBU', 'ASQ', 'ENY', 'FFT', 'NKS', 'F9', 'G4', 'B6', 'WN', 'AA', 'UA', 'DL'
-        ])  # Only fetch for known airline callsigns
+        ])
         
         # Location configuration
         self.center_lat = self.config.get('center_latitude', 27.9506)
@@ -95,12 +96,12 @@ class FlightTrackerPlugin(BasePlugin):
         
         # Log tile server configuration
         if self.custom_tile_server:
-            logger.info(f"[Flight Tracker] Configured to use custom tile server: {self.custom_tile_server}")
+            self.logger.info(f"[Flight Tracker] Configured to use custom tile server: {self.custom_tile_server}")
         else:
-            logger.info(f"[Flight Tracker] Configured to use tile provider: {self.tile_provider}")
+            self.logger.info(f"[Flight Tracker] Configured to use tile provider: {self.tile_provider}")
         
         # Log map appearance settings
-        logger.info(f"[Flight Tracker] Map appearance - Brightness: {self.map_brightness}, Contrast: {self.map_contrast}, Saturation: {self.map_saturation}, Fade: {self.fade_intensity}")
+        self.logger.info(f"[Flight Tracker] Map appearance - Brightness: {self.map_brightness}, Contrast: {self.map_contrast}, Saturation: {self.map_saturation}, Fade: {self.fade_intensity}")
         
         # Track cache errors
         self.cache_error_count = 0
@@ -116,20 +117,20 @@ class FlightTrackerPlugin(BasePlugin):
                 test_file = self.tile_cache_dir / '.writetest'
                 test_file.write_text('test')
                 test_file.unlink()
-                logger.info(f"[Flight Tracker] Using map tile cache directory: {self.tile_cache_dir}")
+                self.logger.info(f"[Flight Tracker] Using map tile cache directory: {self.tile_cache_dir}")
             except (PermissionError, OSError) as e:
-                logger.warning(f"[Flight Tracker] Could not use map tile cache directory {self.tile_cache_dir}: {e}")
+                self.logger.warning(f"[Flight Tracker] Could not use map tile cache directory {self.tile_cache_dir}: {e}")
                 # Fallback to a temporary directory
                 import tempfile
                 self.tile_cache_dir = Path(tempfile.gettempdir()) / 'ledmatrix_map_tiles'
                 self.tile_cache_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"[Flight Tracker] Using temporary map tile cache: {self.tile_cache_dir}")
+                self.logger.info(f"[Flight Tracker] Using temporary map tile cache: {self.tile_cache_dir}")
         else:
             # No cache directory available, use temporary
             import tempfile
             self.tile_cache_dir = Path(tempfile.gettempdir()) / 'ledmatrix_map_tiles'
             self.tile_cache_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[Flight Tracker] Using temporary map tile cache: {self.tile_cache_dir}")
+            self.logger.info(f"[Flight Tracker] Using temporary map tile cache: {self.tile_cache_dir}")
         
         # Cached map background
         self.cached_map_bg = None
@@ -172,7 +173,8 @@ class FlightTrackerPlugin(BasePlugin):
         self.proximity_duration = self.proximity_config.get('duration_seconds', 30)
         
         # Runtime data
-        self.aircraft_data = {}  # ICAO -> aircraft dict
+        self.aircraft_data = {}  # ICAO -> aircraft dict (within map_radius_miles)
+        self.all_aircraft_data = {}  # ICAO -> aircraft dict (all with position, for stats)
         self.aircraft_trails = {}  # ICAO -> list of (lat, lon, timestamp) tuples
         self.last_update = 0
         self.last_fetch = 0
@@ -184,11 +186,12 @@ class FlightTrackerPlugin(BasePlugin):
         self.budget_warning_threshold = 0.8  # Warn at 80% of budget
         
         # Background service for flight plan data
-        self.background_service_enabled = self.config.get('background_service', {}).get('enabled', True)
-        self.background_fetch_interval = self.config.get('background_service', {}).get('fetch_interval_hours', 4) * 3600  # More frequent fetching
+        bg_svc = self._fa_config('background_service', {})
+        self.background_service_enabled = bg_svc.get('enabled', True)
+        self.background_fetch_interval = bg_svc.get('fetch_interval_hours', 4) * 3600
         self.last_background_fetch = 0
         self.pending_flight_plans = set()  # Callsigns to fetch in background
-        self.max_background_calls_per_run = self.config.get('background_service', {}).get('max_calls_per_run', 10)  # More calls per background run
+        self.max_background_calls_per_run = bg_svc.get('max_calls_per_run', 10)
         
         # FR24 data source configuration
         self.data_source = self.config.get('data_source', 'skyaware')
@@ -254,6 +257,9 @@ class FlightTrackerPlugin(BasePlugin):
         self.tracked_flight_data: Dict[str, TrackedFlight] = {}
         self._area_page = 0
         self._area_last_page_change = 0.0
+        self._auto_mode_index = 0
+        self._auto_mode_last_change = 0.0
+        self._auto_rotate_interval = 10.0  # seconds per mode in auto rotation
         self._tracking_index = 0
         self._tracking_last_change = 0.0
         self._last_tracked_update = 0.0
@@ -268,13 +274,13 @@ class FlightTrackerPlugin(BasePlugin):
         self.aircraft_db = None
         self.aircraft_db_loaded = False  # Track if we've attempted to load the DB
         self.aircraft_db_cache_dir = cache_manager.cache_dir if cache_manager.cache_dir else Path.home() / '.cache' / 'ledmatrix'
-        logger.debug("[Flight Tracker] Aircraft database will be lazy-loaded on first use")
+        self.logger.debug("[Flight Tracker] Aircraft database will be lazy-loaded on first use")
         
-        logger.info(f"[Flight Tracker] Initialized with center: ({self.center_lat}, {self.center_lon}), radius: {self.map_radius_miles}mi")
+        self.logger.info(f"[Flight Tracker] Initialized with center: ({self.center_lat}, {self.center_lon}), radius: {self.map_radius_miles}mi")
         if self.data_source == 'flightradar24':
-            logger.info(f"[Flight Tracker] Display: {self.display_width}x{self.display_height}, Data source: FlightRadar24")
+            self.logger.info(f"[Flight Tracker] Display: {self.display_width}x{self.display_height}, Data source: FlightRadar24")
         else:
-            logger.info(f"[Flight Tracker] Display: {self.display_width}x{self.display_height}, Data source: SkyAware ({self.skyaware_url}), FR24 enrichment: {self.fr24_enrichment}")
+            self.logger.info(f"[Flight Tracker] Display: {self.display_width}x{self.display_height}, Data source: SkyAware ({self.skyaware_url}), FR24 enrichment: {self.fr24_enrichment}")
     
     @property
     def display_width(self) -> int:
@@ -335,9 +341,9 @@ class FlightTrackerPlugin(BasePlugin):
             fonts['medium'] = fonts['data_medium'] 
             fonts['large'] = fonts['data_large']
             
-            logger.info("[Flight Tracker] Successfully loaded mixed fonts: PressStart2P for titles, 4x6 for data")
+            self.logger.info("[Flight Tracker] Successfully loaded mixed fonts: PressStart2P for titles, 4x6 for data")
         except Exception as e:
-            logger.warning(f"[Flight Tracker] Failed to load mixed fonts: {e}, using PressStart2P fallback")
+            self.logger.warning(f"[Flight Tracker] Failed to load mixed fonts: {e}, using PressStart2P fallback")
             try:
                 # Fallback to PressStart2P for everything
                 press_start_path = find_font_path('PressStart2P-Regular.ttf')
@@ -362,11 +368,11 @@ class FlightTrackerPlugin(BasePlugin):
                     fonts['medium'] = fonts['data_medium']
                     fonts['large'] = fonts['data_large']
                     
-                    logger.info("[Flight Tracker] Using PressStart2P fallback for all fonts")
+                    self.logger.info("[Flight Tracker] Using PressStart2P fallback for all fonts")
                 else:
                     raise FileNotFoundError("No fonts found")
             except Exception as e2:
-                logger.warning(f"[Flight Tracker] All custom fonts failed: {e2}, using default")
+                self.logger.warning(f"[Flight Tracker] All custom fonts failed: {e2}, using default")
                 fonts['title_small'] = ImageFont.load_default()
                 fonts['title_medium'] = ImageFont.load_default()
                 fonts['title_large'] = ImageFont.load_default()
@@ -484,6 +490,44 @@ class FlightTrackerPlugin(BasePlugin):
         font_height = self._get_font_height(font)
         return int(font_height * padding_factor)
     
+    @staticmethod
+    def _normalize_flightaware_config(config: Dict) -> None:
+        """Normalize FlightAware config: copy nested flightaware.* to flat keys.
+
+        This ensures enrichment modules and any code reading flat keys from
+        config works regardless of whether the user has the new nested schema
+        or the old flat schema.  Called once at init before any config reads.
+        """
+        fa = config.get('flightaware', {})
+        if not fa:
+            return
+        flat_map = {
+            'api_key': 'flightaware_api_key',
+            'enabled': 'flight_plan_enabled',
+            'max_api_calls_per_hour': 'max_api_calls_per_hour',
+            'daily_api_budget': 'daily_api_budget',
+            'cache_ttl_hours': 'flight_plan_cache_ttl_hours',
+            'min_callsign_length': 'min_callsign_length',
+            'airline_callsign_prefixes': 'airline_callsign_prefixes',
+            'background_service': 'background_service',
+        }
+        for nested_key, flat_key in flat_map.items():
+            if nested_key in fa:
+                config[flat_key] = fa[nested_key]
+
+    def _fa_config(self, key, default=None):
+        """Read FlightAware config from nested 'flightaware' object with flat fallback."""
+        fa = self.config.get('flightaware', {})
+        if key in fa:
+            return fa[key]
+        # Backward compatibility: check old flat keys
+        flat_map = {
+            'api_key': 'flightaware_api_key',
+            'enabled': 'flight_plan_enabled',
+            'cache_ttl_hours': 'flight_plan_cache_ttl_hours',
+        }
+        return self.config.get(flat_map.get(key, key), default)
+
     def _is_callsign_worth_fetching(self, callsign: str) -> bool:
         """Determine if a callsign is worth fetching flight plan data for."""
         return is_callsign_worth_fetching(callsign, self.min_callsign_length, self.airline_callsign_prefixes)
@@ -501,11 +545,11 @@ class FlightTrackerPlugin(BasePlugin):
         if self.last_reset_date != current_date:
             self.api_calls_today = 0
             self.last_reset_date = current_date
-            logger.info(f"[Flight Tracker] Daily API budget reset: {self.daily_api_budget} calls available")
+            self.logger.info(f"[Flight Tracker] Daily API budget reset: {self.daily_api_budget} calls available")
         
         # Check daily budget first (more restrictive)
         if self.api_calls_today >= self.daily_api_budget:
-            logger.warning(f"[Flight Tracker] Daily API budget reached: {self.api_calls_today}/{self.daily_api_budget} calls today")
+            self.logger.warning(f"[Flight Tracker] Daily API budget reached: {self.api_calls_today}/{self.daily_api_budget} calls today")
             return False
         
         # Check hourly rate limit
@@ -513,7 +557,7 @@ class FlightTrackerPlugin(BasePlugin):
         self.api_call_timestamps = [ts for ts in self.api_call_timestamps if ts > hour_ago]
         
         if len(self.api_call_timestamps) >= self.max_api_calls_per_hour:
-            logger.warning(f"[Flight Tracker] Hourly rate limit reached: {len(self.api_call_timestamps)}/{self.max_api_calls_per_hour} calls in the last hour")
+            self.logger.warning(f"[Flight Tracker] Hourly rate limit reached: {len(self.api_call_timestamps)}/{self.max_api_calls_per_hour} calls in the last hour")
             return False
         
         return True
@@ -530,13 +574,13 @@ class FlightTrackerPlugin(BasePlugin):
         budget_usage = current_cost / self.monthly_budget
         
         # Log cost information
-        logger.info(f"[Flight Tracker] API call recorded. Today: {self.api_calls_today}/{self.daily_api_budget}, "
+        self.logger.info(f"[Flight Tracker] API call recorded. Today: {self.api_calls_today}/{self.daily_api_budget}, "
                    f"Monthly: {self.monthly_api_calls} calls (${current_cost:.2f}), "
                    f"Budget usage: {budget_usage:.1%}")
         
         # Budget warning
         if budget_usage >= self.budget_warning_threshold:
-            logger.warning(f"[Flight Tracker] BUDGET WARNING: {budget_usage:.1%} of monthly budget used "
+            self.logger.warning(f"[Flight Tracker] BUDGET WARNING: {budget_usage:.1%} of monthly budget used "
                           f"(${current_cost:.2f}/${self.monthly_budget:.2f})")
         
         # Smart budget management - reduce daily budget as month progresses
@@ -544,11 +588,11 @@ class FlightTrackerPlugin(BasePlugin):
         current_day = datetime.now().day
         if current_day > 15:  # After mid-month, be more conservative
             self.daily_api_budget = min(self.daily_api_budget, 40)  # Reduce to 40 calls/day
-            logger.info(f"[Flight Tracker] Mid-month budget adjustment: {self.daily_api_budget} calls/day")
+            self.logger.info(f"[Flight Tracker] Mid-month budget adjustment: {self.daily_api_budget} calls/day")
         
         # Emergency stop at 95% budget
         if budget_usage >= 0.95:
-            logger.error(f"[Flight Tracker] EMERGENCY STOP: 95% of budget reached. Disabling API calls.")
+            self.logger.error("[Flight Tracker] EMERGENCY STOP: 95% of budget reached. Disabling API calls.")
             self.daily_api_budget = 0  # Effectively disable further calls
     
     
@@ -562,15 +606,15 @@ class FlightTrackerPlugin(BasePlugin):
             # Cache the data
             self.cache_manager.set('flight_tracker_data', data)
             
-            logger.debug(f"[Flight Tracker] Fetched data: {len(data.get('aircraft', []))} aircraft")
+            self.logger.debug(f"[Flight Tracker] Fetched data: {len(data.get('aircraft', []))} aircraft")
             return data
         except requests.exceptions.RequestException as e:
-            logger.error(f"[Flight Tracker] Failed to fetch aircraft data: {e}")
+            self.logger.error(f"[Flight Tracker] Failed to fetch aircraft data: {e}")
             
             # Try to use cached data
             cached_data = self.cache_manager.get('flight_tracker_data')
             if cached_data:
-                logger.info("[Flight Tracker] Using cached aircraft data")
+                self.logger.info("[Flight Tracker] Using cached aircraft data")
                 return cached_data
             
             return None
@@ -629,7 +673,7 @@ class FlightTrackerPlugin(BasePlugin):
             response.raise_for_status()
             raw = response.json()
         except Exception:
-            logger.exception("[Flight Tracker] FR24 feed fetch failed")
+            self.logger.exception("[Flight Tracker] FR24 feed fetch failed")
             return None
 
         current_time = time.time()
@@ -696,7 +740,7 @@ class FlightTrackerPlugin(BasePlugin):
                 'last_seen': current_time,
             }
 
-        logger.info(f"[Flight Tracker] FR24 feed returned {len(result)} aircraft in range ({self.map_radius_miles}mi)")
+        self.logger.info(f"[Flight Tracker] FR24 feed returned {len(result)} aircraft in range ({self.map_radius_miles}mi)")
         return result
 
     def _fetch_fr24_detail(self, fr24_id: str) -> Optional[Dict]:
@@ -719,7 +763,7 @@ class FlightTrackerPlugin(BasePlugin):
             self.fr24_detail_cache[fr24_id] = data
             return data
         except Exception as e:
-            logger.warning(f"[Flight Tracker] FR24 detail fetch failed for {fr24_id}: {e}")
+            self.logger.warning(f"[Flight Tracker] FR24 detail fetch failed for {fr24_id}: {e}")
             return None
 
     def _enrich_aircraft_from_fr24_detail(self, aircraft: Dict) -> None:
@@ -801,7 +845,7 @@ class FlightTrackerPlugin(BasePlugin):
             return
         self.last_fr24_enrichment = current_time
 
-        logger.info("[Flight Tracker] Refreshing FR24 enrichment data")
+        self.logger.info("[Flight Tracker] Refreshing FR24 enrichment data")
         feed = self._fetch_fr24_feed()
         if not feed:
             return
@@ -826,7 +870,7 @@ class FlightTrackerPlugin(BasePlugin):
                     ac['fr24_id'] = fr24_info['fr24_id']
                 matched += 1
 
-        logger.info(f"[Flight Tracker] FR24 enrichment matched {matched}/{len(self.aircraft_data)} tracked aircraft")
+        self.logger.info(f"[Flight Tracker] FR24 enrichment matched {matched}/{len(self.aircraft_data)} tracked aircraft")
         self._update_flight_records()
 
     def _background_fetch_fr24_details(self) -> None:
@@ -853,9 +897,9 @@ class FlightTrackerPlugin(BasePlugin):
                     data = json.load(f)
                 self._closest_record = data.get('closest')
                 self._farthest_record = data.get('farthest')
-                logger.info(f"[Flight Tracker] Loaded flight records: closest={self._closest_record and self._closest_record.get('callsign')}, farthest={self._farthest_record and self._farthest_record.get('callsign')}")
+                self.logger.info(f"[Flight Tracker] Loaded flight records: closest={self._closest_record and self._closest_record.get('callsign')}, farthest={self._farthest_record and self._farthest_record.get('callsign')}")
         except Exception as e:
-            logger.warning(f"[Flight Tracker] Could not load flight records: {e}")
+            self.logger.warning(f"[Flight Tracker] Could not load flight records: {e}")
 
     def _save_flight_records(self) -> None:
         """Persist closest/farthest records to disk."""
@@ -864,7 +908,7 @@ class FlightTrackerPlugin(BasePlugin):
             with open(self._flight_records_path, 'w') as f:
                 json.dump({'closest': self._closest_record, 'farthest': self._farthest_record}, f, indent=2)
         except Exception as e:
-            logger.warning(f"[Flight Tracker] Could not save flight records: {e}")
+            self.logger.warning(f"[Flight Tracker] Could not save flight records: {e}")
 
     def _make_record_snapshot(self, aircraft: Dict) -> Dict:
         """Create a storable snapshot of a flight for record keeping."""
@@ -890,11 +934,11 @@ class FlightTrackerPlugin(BasePlugin):
             dist = ac.get('distance_miles', 0)
             if self._closest_record is None or dist < self._closest_record['distance_miles']:
                 self._closest_record = self._make_record_snapshot(ac)
-                logger.info(f"[Flight Tracker] New closest record: {ac['callsign']} at {dist:.3f} miles")
+                self.logger.info(f"[Flight Tracker] New closest record: {ac['callsign']} at {dist:.3f} miles")
                 updated = True
             if self._farthest_record is None or dist > self._farthest_record['distance_miles']:
                 self._farthest_record = self._make_record_snapshot(ac)
-                logger.info(f"[Flight Tracker] New farthest record: {ac['callsign']} at {dist:.1f} miles")
+                self.logger.info(f"[Flight Tracker] New farthest record: {ac['callsign']} at {dist:.1f} miles")
                 updated = True
 
         if updated:
@@ -958,6 +1002,90 @@ class FlightTrackerPlugin(BasePlugin):
             return (255, 150, 0)   # Orange
         return (255, 50, 50)       # Red
 
+    def _enrich_from_offline_db(self) -> None:
+        """Fill in aircraft_type from SkyAware's db endpoint or offline FAA DB."""
+        needs_enrichment = [
+            (icao, ac) for icao, ac in self.aircraft_data.items()
+            if not ac.get('aircraft_type') or ac['aircraft_type'] == 'Unknown'
+        ]
+        if not needs_enrichment:
+            return
+
+        # Try SkyAware db endpoint first (lightweight HTTP lookups grouped by prefix)
+        if self.data_source == 'skyaware' and self.skyaware_url:
+            self._enrich_from_skyaware_db(needs_enrichment)
+            # Re-check what still needs enrichment after SkyAware DB
+            needs_enrichment = [
+                (icao, ac) for icao, ac in needs_enrichment
+                if not ac.get('aircraft_type') or ac['aircraft_type'] == 'Unknown'
+            ]
+            if not needs_enrichment:
+                return
+
+        # Fallback to offline FAA database for remaining aircraft
+        if not self.use_offline_db:
+            return
+        for icao, ac in needs_enrichment:
+            info = self._get_aircraft_info_from_database(icao)
+            if info:
+                if info.get('type_aircraft'):
+                    ac['aircraft_type'] = info['type_aircraft']
+                elif info.get('manufacturer') and info.get('model'):
+                    ac['aircraft_type'] = f"{info['manufacturer']} {info['model']}"
+                if info.get('registration') and not ac.get('registration'):
+                    ac['registration'] = info['registration']
+
+    def _enrich_from_skyaware_db(self, aircraft_list) -> None:
+        """Enrich aircraft type from the SkyAware db JSON files served alongside aircraft.json.
+
+        The SkyAware web server exposes /db/<PREFIX>.json files containing
+        aircraft type/registration keyed by hex suffix.  For ICAO A0E000,
+        fetch /db/A0.json and look up key E000.
+        """
+        # Derive base URL: strip /data/aircraft.json to get SkyAware root
+        base = self.skyaware_url
+        for suffix in ('/data/aircraft.json', '/aircraft.json'):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+
+        # Group by 2-char hex prefix to batch requests
+        by_prefix: Dict[str, list] = {}
+        for icao, ac in aircraft_list:
+            prefix = icao[:2].upper()
+            by_prefix.setdefault(prefix, []).append((icao, ac))
+
+        if not hasattr(self, '_skyaware_db_cache'):
+            self._skyaware_db_cache: Dict[str, Dict] = {}
+
+        enriched = 0
+        for prefix, items in by_prefix.items():
+            db_data = self._skyaware_db_cache.get(prefix)
+            if db_data is None:
+                try:
+                    url = f"{base}/db/{prefix}.json"
+                    resp = requests.get(url, timeout=3)
+                    if resp.status_code == 200:
+                        db_data = resp.json()
+                        self._skyaware_db_cache[prefix] = db_data
+                    else:
+                        db_data = {}  # don't cache — allow retry next cycle
+                except (requests.RequestException, IOError, json.JSONDecodeError) as e:
+                    self.logger.debug(f"[Flight Tracker] SkyAware DB fetch failed for prefix {prefix}: {e}")
+                    db_data = {}  # don't cache — allow retry next cycle
+
+            for icao, ac in items:
+                suffix = icao[2:].upper()
+                entry = db_data.get(suffix, {})
+                if entry.get('t'):
+                    ac['aircraft_type'] = entry['t']
+                    enriched += 1
+                if entry.get('r') and not ac.get('registration'):
+                    ac['registration'] = entry['r']
+
+        if enriched:
+            self.logger.info(f"[Flight Tracker] SkyAware DB enriched {enriched}/{len(aircraft_list)} aircraft with type data")
+
     def _ensure_database_loaded(self) -> None:
         """Lazy-load the aircraft database on first use.
         
@@ -970,7 +1098,7 @@ class FlightTrackerPlugin(BasePlugin):
         self.aircraft_db_loaded = True
         
         if not self.use_offline_db:
-            logger.debug("[Flight Tracker] Offline database disabled in config")
+            self.logger.debug("[Flight Tracker] Offline database disabled in config")
             return
         
         try:
@@ -978,11 +1106,11 @@ class FlightTrackerPlugin(BasePlugin):
             self.aircraft_db = AircraftDatabase(self.aircraft_db_cache_dir)
             load_time = time.time() - load_start
             stats = self.aircraft_db.get_stats()
-            logger.info(f"[Flight Tracker] Offline aircraft database loaded: {stats['total_aircraft']} aircraft, {stats['database_size_mb']:.1f}MB in {load_time:.2f}s")
+            self.logger.info(f"[Flight Tracker] Offline aircraft database loaded: {stats['total_aircraft']} aircraft, {stats['database_size_mb']:.1f}MB in {load_time:.2f}s")
             if stats['last_update']:
-                logger.info(f"[Flight Tracker] Database last updated: {stats['last_update']}")
+                self.logger.info(f"[Flight Tracker] Database last updated: {stats['last_update']}")
         except Exception as e:
-            logger.warning(f"[Flight Tracker] Failed to load offline aircraft database: {e}")
+            self.logger.warning(f"[Flight Tracker] Failed to load offline aircraft database: {e}")
             self.aircraft_db = None
     
     def _get_aircraft_info_from_database(self, icao24: str, registration: str = None) -> Optional[Dict]:
@@ -1038,7 +1166,7 @@ class FlightTrackerPlugin(BasePlugin):
                 aircraft_type = ac.get('aircraft_type') or ''
                 airline_name = ac.get('airline_name') or ''
                 if origin or destination or aircraft_type:
-                    logger.debug(f"[Flight Tracker] FR24 enrichment hit for {callsign}: {origin}->{destination} ({aircraft_type})")
+                    self.logger.debug(f"[Flight Tracker] FR24 enrichment hit for {callsign}: {origin}->{destination} ({aircraft_type})")
                     return {
                         'origin': origin or 'Unknown',
                         'destination': destination or 'Unknown',
@@ -1060,7 +1188,7 @@ class FlightTrackerPlugin(BasePlugin):
                 elif db_info.get('model'):
                     aircraft_type = db_info['model']
                 
-                logger.debug(f"[Flight Tracker] Found {callsign} in offline DB: {aircraft_type}")
+                self.logger.debug(f"[Flight Tracker] Found {callsign} in offline DB: {aircraft_type}")
                 
                 # If we got aircraft type from database, return early without API call
                 # We still don't have origin/destination, but that's okay for most use cases
@@ -1074,21 +1202,21 @@ class FlightTrackerPlugin(BasePlugin):
                 }
         
         if not self.flight_plan_enabled:
-            logger.debug(f"[Flight Tracker] Flight plan disabled for {callsign} (flight_plan_enabled=False)")
+            self.logger.debug(f"[Flight Tracker] Flight plan disabled for {callsign} (flight_plan_enabled=False)")
             return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': aircraft_type or aircraft_category}
         
         if not self.flightaware_api_key:
-            logger.info(f"[Flight Tracker] No API key configured for {callsign}")
+            self.logger.info(f"[Flight Tracker] No API key configured for {callsign}")
             return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': aircraft_category}
         
         # Check if callsign is worth fetching (cost control)
         if not self._is_callsign_worth_fetching(callsign):
-            logger.info(f"[Flight Tracker] Skipping flight plan fetch for {callsign} (not worth fetching - category: {aircraft_category})")
+            self.logger.info(f"[Flight Tracker] Skipping flight plan fetch for {callsign} (not worth fetching - category: {aircraft_category})")
             return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': aircraft_category}
         
         # Check rate limiting
         if not self._check_rate_limit():
-            logger.warning(f"[Flight Tracker] Rate limit reached, skipping API call for {callsign}")
+            self.logger.warning(f"[Flight Tracker] Rate limit reached, skipping API call for {callsign}")
             return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': aircraft_category}
         
         # Use cache manager for flight plan data
@@ -1096,10 +1224,10 @@ class FlightTrackerPlugin(BasePlugin):
         cached_data = self.cache_manager.get(cache_key, max_age=self.cache_ttl_seconds)
         
         if cached_data:
-            logger.debug(f"[Flight Tracker] Using cached flight plan for {callsign}")
+            self.logger.debug(f"[Flight Tracker] Using cached flight plan for {callsign}")
             return cached_data
         
-        logger.info(f"[Flight Tracker] Fetching flight plan data for {callsign}")
+        self.logger.info(f"[Flight Tracker] Fetching flight plan data for {callsign}")
         
         try:
             # FlightAware AeroAPI integration
@@ -1130,7 +1258,7 @@ class FlightTrackerPlugin(BasePlugin):
                     }
                     
                     # Log the full flight data for debugging (first time only)
-                    logger.debug(f"[Flight Tracker] API response keys for {callsign}: {list(flight.keys())}")
+                    self.logger.debug(f"[Flight Tracker] API response keys for {callsign}: {list(flight.keys())}")
                 else:
                     # Fallback for single flight response format
                     aircraft_type = (
@@ -1149,24 +1277,24 @@ class FlightTrackerPlugin(BasePlugin):
                 # Cache using the cache manager
                 self.cache_manager.set(cache_key, flight_plan)
                 self._record_api_call()
-                logger.info(f"[Flight Tracker] Successfully fetched and cached flight plan for {callsign}: {flight_plan['origin']} -> {flight_plan['destination']} ({flight_plan['aircraft_type']})")
+                self.logger.info(f"[Flight Tracker] Successfully fetched and cached flight plan for {callsign}: {flight_plan['origin']} -> {flight_plan['destination']} ({flight_plan['aircraft_type']})")
                 return flight_plan
             else:
-                logger.warning(f"[Flight Tracker] API returned status {response.status_code} for {callsign}: {response.text[:100]}")
+                self.logger.warning(f"[Flight Tracker] API returned status {response.status_code} for {callsign}: {response.text[:100]}")
                 return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': 'Unknown'}
                 
         except Exception as e:
-            logger.warning(f"[Flight Tracker] Failed to fetch flight plan for {callsign}: {e}")
+            self.logger.warning(f"[Flight Tracker] Failed to fetch flight plan for {callsign}: {e}")
             return {'origin': 'Unknown', 'destination': 'Unknown', 'aircraft_type': 'Unknown'}
     
     def _process_aircraft_data(self, data: Dict) -> None:
         """Process and update aircraft data."""
         if not data or 'aircraft' not in data:
-            logger.warning("[Flight Tracker] No aircraft data in response")
+            self.logger.warning("[Flight Tracker] No aircraft data in response")
             return
         
         total_aircraft = len(data['aircraft'])
-        logger.info(f"[Flight Tracker] Processing {total_aircraft} aircraft from SkyAware")
+        self.logger.info(f"[Flight Tracker] Processing {total_aircraft} aircraft from SkyAware")
         
         current_time = time.time()
         active_icao = set()
@@ -1190,12 +1318,11 @@ class FlightTrackerPlugin(BasePlugin):
             # Calculate distance from center
             distance_miles = self._calculate_distance(lat, lon, self.center_lat, self.center_lon)
             
-            # Filter by radius
-            if distance_miles > self.map_radius_miles:
-                continue
-            
-            aircraft_in_range += 1
-            
+            # Track whether in radius for map/area modes
+            in_range = distance_miles <= self.map_radius_miles
+            if in_range:
+                aircraft_in_range += 1
+
             active_icao.add(icao)
             
             # Extract other fields
@@ -1216,11 +1343,17 @@ class FlightTrackerPlugin(BasePlugin):
             # Calculate color based on altitude
             color = self._altitude_to_color(altitude)
 
+            # Derive airline ICAO from callsign (e.g. UAL410 -> UAL, SWA2447 -> SWA)
+            airline_icao = ''
+            if callsign and len(callsign) >= 4 and callsign[:3].isalpha() and not callsign[:3] == callsign:
+                airline_icao = callsign[:3].upper()
+
             # Build aircraft dict
             aircraft_info = {
                 'icao': icao,
                 'callsign': callsign,
                 'registration': registration,
+                'airline_icao': airline_icao,
                 'lat': lat,
                 'lon': lon,
                 'altitude': altitude,
@@ -1235,8 +1368,16 @@ class FlightTrackerPlugin(BasePlugin):
                 'last_seen': current_time
             }
             
-            # Update aircraft data
-            self.aircraft_data[icao] = aircraft_info
+            # Update aircraft data — all_aircraft_data for stats, aircraft_data for map/area
+            self.all_aircraft_data[icao] = aircraft_info
+            if in_range:
+                self.aircraft_data[icao] = aircraft_info
+            elif icao in self.aircraft_data:
+                # Aircraft moved out of range — remove from map/area data
+                del self.aircraft_data[icao]
+                self.aircraft_trails.pop(icao, None)
+            if not in_range:
+                continue
             
             # Update trail if enabled
             if self.show_trails:
@@ -1250,14 +1391,18 @@ class FlightTrackerPlugin(BasePlugin):
                     self.aircraft_trails[icao] = self.aircraft_trails[icao][-self.trail_length:]
         
         # Clean up old aircraft (not seen in last 60 seconds)
-        stale_icao = [icao for icao, info in self.aircraft_data.items() 
+        stale_icao = [icao for icao, info in self.aircraft_data.items()
                       if current_time - info['last_seen'] > 60]
         for icao in stale_icao:
             del self.aircraft_data[icao]
             if icao in self.aircraft_trails:
                 del self.aircraft_trails[icao]
+        stale_all = [icao for icao, info in self.all_aircraft_data.items()
+                     if current_time - info['last_seen'] > 60]
+        for icao in stale_all:
+            del self.all_aircraft_data[icao]
         
-        logger.info(f"[Flight Tracker] Summary - Total: {total_aircraft}, With position: {aircraft_with_position}, In range ({self.map_radius_miles}mi): {aircraft_in_range}, Tracking: {len(self.aircraft_data)}, Removed stale: {len(stale_icao)}")
+        self.logger.info(f"[Flight Tracker] Summary - Total: {total_aircraft}, With position: {aircraft_with_position}, In range ({self.map_radius_miles}mi): {aircraft_in_range}, Tracking: {len(self.aircraft_data)}, Removed stale: {len(stale_icao)}")
         self._update_flight_records()
     
     def _altitude_to_color(self, altitude: float) -> Tuple[int, int, int]:
@@ -1326,8 +1471,8 @@ class FlightTrackerPlugin(BasePlugin):
         y_pixel = int(self.display_height / 2 + offset_y)
         
         # Debug logging
-        logger.debug(f"[Flight Tracker] Converting ({lat:.6f}, {lon:.6f}) to pixel ({x_pixel}, {y_pixel})")
-        logger.debug(f"[Flight Tracker] Distance: {distance_miles:.2f}mi, Bearing: {math.degrees(bearing_rad):.1f}°, Pixels/mile: {pixels_per_mile:.2f}, Radius: {effective_radius:.1f}mi")
+        self.logger.debug(f"[Flight Tracker] Converting ({lat:.6f}, {lon:.6f}) to pixel ({x_pixel}, {y_pixel})")
+        self.logger.debug(f"[Flight Tracker] Distance: {distance_miles:.2f}mi, Bearing: {math.degrees(bearing_rad):.1f}°, Pixels/mile: {pixels_per_mile:.2f}, Radius: {effective_radius:.1f}mi")
         
         # Check if within display bounds
         if 0 <= x_pixel < self.display_width and 0 <= y_pixel < self.display_height:
@@ -1339,7 +1484,7 @@ class FlightTrackerPlugin(BasePlugin):
         
         if coord_key not in self.bounds_warning_cache or \
            current_time - self.bounds_warning_cache[coord_key] > self.bounds_warning_interval:
-            logger.debug(f"[Flight Tracker] Coordinate ({lat}, {lon}) -> pixel ({x}, {y}) is outside display bounds {self.display_width}x{self.display_height}")
+            self.logger.debug(f"[Flight Tracker] Coordinate ({lat}, {lon}) -> pixel ({x_pixel}, {y_pixel}) is outside display bounds {self.display_width}x{self.display_height}")
             self.bounds_warning_cache[coord_key] = current_time
         
         return None
@@ -1433,14 +1578,14 @@ class FlightTrackerPlugin(BasePlugin):
             try:
                 return PILImage.open(cache_path)
             except Exception as e:
-                logger.warning(f"[Flight Tracker] Failed to load cached tile {x},{y},{zoom}: {e}")
+                self.logger.warning(f"[Flight Tracker] Failed to load cached tile {x},{y},{zoom}: {e}")
         
         # Fetch from server - try multiple URLs
         urls = self._get_tile_urls(x, y, zoom)
         
         for i, url in enumerate(urls):
             try:
-                logger.info(f"[Flight Tracker] Fetching tile {x},{y} at zoom {zoom} from: {url}")
+                self.logger.debug(f"[Flight Tracker] Fetching tile {x},{y} at zoom {zoom} from: {url}")
                 
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
@@ -1448,16 +1593,16 @@ class FlightTrackerPlugin(BasePlugin):
                 # Check if we got an error page instead of a tile
                 content_type = response.headers.get('content-type', '').lower()
                 if 'text/html' in content_type or 'text/plain' in content_type:
-                    logger.debug(f"[Flight Tracker] Got HTML/text response from {url}")
+                    self.logger.debug(f"[Flight Tracker] Got HTML/text response from {url}")
                     continue  # Try next URL
                 
                 # Check if response is too small (likely an error page)
                 if len(response.content) < 2000:  # Tiles are usually much larger
-                    logger.debug(f"[Flight Tracker] Tile response too small ({len(response.content)} bytes) from {url}")
+                    self.logger.debug(f"[Flight Tracker] Tile response too small ({len(response.content)} bytes) from {url}")
                     # Try to read the error message
                     try:
                         error_text = response.content.decode('utf-8', errors='ignore')[:200]
-                        logger.debug(f"[Flight Tracker] Error content: {error_text}")
+                        self.logger.debug(f"[Flight Tracker] Error content: {error_text}")
                     except:
                         pass
                     continue  # Try next URL
@@ -1469,7 +1614,7 @@ class FlightTrackerPlugin(BasePlugin):
                     
                     # Check if image is too small (likely an error page rendered as image)
                     if test_img.size[0] < 100 or test_img.size[1] < 100:
-                        logger.debug(f"[Flight Tracker] Tile image too small: {test_img.size}")
+                        self.logger.debug(f"[Flight Tracker] Tile image too small: {test_img.size}")
                         continue
                     
                     # Check for suspiciously uniform colors (error pages often have solid colors)
@@ -1487,29 +1632,29 @@ class FlightTrackerPlugin(BasePlugin):
                             # If more than 80% of pixels are the same color, it's likely an error page
                             max_count = max(color_counts.values())
                             if max_count > len(pixels[::100]) * 0.8:
-                                logger.debug(f"[Flight Tracker] Tile appears to be solid color (error page)")
+                                self.logger.debug("[Flight Tracker] Tile appears to be solid color (error page)")
                                 continue
                     
                 except Exception as e:
-                    logger.debug(f"[Flight Tracker] Could not validate tile image: {e}")
+                    self.logger.debug(f"[Flight Tracker] Could not validate tile image: {e}")
                     # Continue anyway if we can't validate
                 
                 # If we get here, we have a valid tile
-                logger.debug(f"[Flight Tracker] ✓ Successfully fetched tile from URL {i+1}: {url}")
-                logger.debug(f"[Flight Tracker]   Tile size: {len(response.content)} bytes, Content-Type: {response.headers.get('content-type', 'unknown')}")
+                self.logger.debug(f"[Flight Tracker] ✓ Successfully fetched tile from URL {i+1}: {url}")
+                self.logger.debug(f"[Flight Tracker]   Tile size: {len(response.content)} bytes, Content-Type: {response.headers.get('content-type', 'unknown')}")
                 
                 # Save to cache
                 try:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(cache_path, 'wb') as f:
                         f.write(response.content)
-                    logger.debug(f"[Flight Tracker] Cached tile {x},{y},{zoom}")
+                    self.logger.debug(f"[Flight Tracker] Cached tile {x},{y},{zoom}")
                     # Reset cache error count on successful cache
                     if self.cache_error_count > 0:
                         self.cache_error_count = 0
                     return PILImage.open(cache_path)
                 except (PermissionError, OSError) as e:
-                    logger.warning(f"[Flight Tracker] Could not save tile to cache {cache_path}: {e}")
+                    self.logger.warning(f"[Flight Tracker] Could not save tile to cache {cache_path}: {e}")
                     # Track cache error
                     self.cache_error_count += 1
                     # Continue without caching - create a temporary file
@@ -1520,7 +1665,7 @@ class FlightTrackerPlugin(BasePlugin):
                     return PILImage.open(temp_file.name)
                 
             except Exception as e:
-                logger.warning(f"[Flight Tracker] Failed to fetch tile from {url}: {e}")
+                self.logger.warning(f"[Flight Tracker] Failed to fetch tile from {url}: {e}")
                 if i == len(urls) - 1:  # Last URL failed
                     return None
                 continue  # Try next URL
@@ -1535,14 +1680,14 @@ class FlightTrackerPlugin(BasePlugin):
         
         # Check if we should disable due to too many cache errors
         if self.disable_on_cache_error and self.cache_error_count >= self.max_cache_errors:
-            logger.warning(f"[Flight Tracker] Disabling map background due to {self.cache_error_count} cache errors")
+            self.logger.warning(f"[Flight Tracker] Disabling map background due to {self.cache_error_count} cache errors")
             return None
         
         # Calculate appropriate zoom level based on map radius and zoom factor
         zoom = self._calculate_zoom_level()
         effective_radius = self.map_radius_miles / self.zoom_factor
         
-        logger.debug(f"[Flight Tracker] Map zoom calculation: radius={self.map_radius_miles}mi, zoom_factor={self.zoom_factor}, effective_radius={effective_radius:.2f}mi, zoom={zoom}")
+        self.logger.debug(f"[Flight Tracker] Map zoom calculation: radius={self.map_radius_miles}mi, zoom_factor={self.zoom_factor}, effective_radius={effective_radius:.2f}mi, zoom={zoom}")
         
         # Check if we can reuse the cached composite map
         current_center = (round(center_lat, 4), round(center_lon, 4))
@@ -1572,13 +1717,13 @@ class FlightTrackerPlugin(BasePlugin):
         tiles_x = min(max_tiles, max(2, base_tiles_x + 2))  # Add 2 for buffer
         tiles_y = min(max_tiles, max(2, base_tiles_y + 2))  # Add 2 for buffer
         
-        logger.info(f"[Flight Tracker] Tile calculation: base=({base_tiles_x}x{base_tiles_y}), final=({tiles_x}x{tiles_y}), total={tiles_x * tiles_y}")
+        self.logger.debug(f"[Flight Tracker] Tile calculation: base=({base_tiles_x}x{base_tiles_y}), final=({tiles_x}x{tiles_y}), total={tiles_x * tiles_y}")
         
         # Log tile server being used
         if self.custom_tile_server:
-            logger.info(f"[Flight Tracker] Using custom tile server: {self.custom_tile_server}")
+            self.logger.debug(f"[Flight Tracker] Using custom tile server: {self.custom_tile_server}")
         else:
-            logger.info(f"[Flight Tracker] Using tile provider: {self.tile_provider}")
+            self.logger.debug(f"[Flight Tracker] Using tile provider: {self.tile_provider}")
         
         # Calculate tile bounds
         start_x = center_x - tiles_x // 2
@@ -1610,26 +1755,26 @@ class FlightTrackerPlugin(BasePlugin):
                     paste_y = ty * self.tile_size
                     composite.paste(tile_img, (paste_x, paste_y))
                     tiles_fetched += 1
-                    logger.debug(f"[Flight Tracker] ✓ Placed tile {tile_x},{tile_y} at ({paste_x},{paste_y})")
+                    self.logger.debug(f"[Flight Tracker] ✓ Placed tile {tile_x},{tile_y} at ({paste_x},{paste_y})")
                 else:
                     failed_tiles.append((tile_x, tile_y))
-                    logger.warning(f"[Flight Tracker] ✗ Failed to fetch tile {tile_x},{tile_y}")
+                    self.logger.warning(f"[Flight Tracker] ✗ Failed to fetch tile {tile_x},{tile_y}")
         
         if tiles_fetched == 0:
-            logger.warning("[Flight Tracker] No map tiles could be fetched")
+            self.logger.warning("[Flight Tracker] No map tiles could be fetched")
             return None
         
         # Log summary of failed tiles
         if failed_tiles:
-            logger.warning(f"[Flight Tracker] Failed to fetch {len(failed_tiles)} tiles: {failed_tiles}")
+            self.logger.warning(f"[Flight Tracker] Failed to fetch {len(failed_tiles)} tiles: {failed_tiles}")
             # If more than 50% of tiles failed, disable map background
             failure_rate = len(failed_tiles) / (tiles_x * tiles_y)
             if failure_rate > 0.5:
-                logger.warning(f"[Flight Tracker] High tile failure rate ({failure_rate:.1%}), disabling map background")
+                self.logger.warning(f"[Flight Tracker] High tile failure rate ({failure_rate:.1%}), disabling map background")
                 self.map_bg_enabled = False
                 return None
         else:
-            logger.info(f"[Flight Tracker] All tiles fetched successfully")
+            self.logger.debug("[Flight Tracker] All tiles fetched successfully")
         
         # Calculate what geographic area the tiles natively show at this zoom level
         world_pixels_at_zoom = self.tile_size * (2 ** zoom)
@@ -1677,10 +1822,10 @@ class FlightTrackerPlugin(BasePlugin):
         
         # Crop to get the desired geographic area
         cropped = composite.crop((crop_left, crop_top, crop_right, crop_bottom))
-        logger.debug(f"[Flight Tracker] Cropped size: {cropped.size} (wanted {crop_width_needed}x{crop_height_needed} pixels for {desired_miles_wide:.1f} miles)")
+        self.logger.debug(f"[Flight Tracker] Cropped size: {cropped.size} (wanted {crop_width_needed}x{crop_height_needed} pixels for {desired_miles_wide:.1f} miles)")
         
         # Now resize to display dimensions - this scales the geographic area to fit the display
-        logger.debug(f"[Flight Tracker] Resizing from {cropped.size} to ({self.display_width}, {self.display_height})")
+        self.logger.debug(f"[Flight Tracker] Resizing from {cropped.size} to ({self.display_width}, {self.display_height})")
         cropped = cropped.resize((self.display_width, self.display_height), Image.Resampling.LANCZOS)
         
         # Apply fade effect
@@ -1693,19 +1838,19 @@ class FlightTrackerPlugin(BasePlugin):
         if self.map_brightness != 1.0:
             enhancer = ImageEnhance.Brightness(cropped)
             cropped = enhancer.enhance(self.map_brightness)
-            logger.debug(f"[Flight Tracker] Applied brightness: {self.map_brightness}")
+            self.logger.debug(f"[Flight Tracker] Applied brightness: {self.map_brightness}")
         
         # Apply contrast adjustment
         if self.map_contrast != 1.0:
             enhancer = ImageEnhance.Contrast(cropped)
             cropped = enhancer.enhance(self.map_contrast)
-            logger.debug(f"[Flight Tracker] Applied contrast: {self.map_contrast}")
+            self.logger.debug(f"[Flight Tracker] Applied contrast: {self.map_contrast}")
         
         # Apply saturation adjustment
         if self.map_saturation != 1.0:
             enhancer = ImageEnhance.Color(cropped)
             cropped = enhancer.enhance(self.map_saturation)
-            logger.debug(f"[Flight Tracker] Applied saturation: {self.map_saturation}")
+            self.logger.debug(f"[Flight Tracker] Applied saturation: {self.map_saturation}")
         
         # Cache the result
         self.cached_map_bg = cropped
@@ -1716,23 +1861,23 @@ class FlightTrackerPlugin(BasePlugin):
         desired_miles_high = crop_height_needed / pixels_per_mile_at_zoom
         
         # Log the final map configuration
-        logger.info(f"[Flight Tracker] Generated map background with {tiles_fetched} tiles at zoom {zoom}")
-        logger.info(f"[Flight Tracker] Center: ({center_lat:.4f}, {center_lon:.4f}), Radius: {self.map_radius_miles}mi, Effective: {effective_radius:.2f}mi (zoom_factor: {self.zoom_factor})")
-        logger.info(f"[Flight Tracker] Tile coverage: {tiles_x}x{tiles_y}, Crop: ({crop_left},{crop_top})-({crop_right},{crop_bottom})")
-        logger.info(f"[Flight Tracker] Map displays {desired_miles_wide:.1f} miles wide x {desired_miles_high:.1f} miles high (no stretching)")
-        logger.info(f"[Flight Tracker] Native tile scale: {pixels_per_mile_at_zoom:.3f} pixels/mile, cropped {crop_width_needed}x{crop_height_needed} pixels, scaled to {self.display_width}x{self.display_height}")
+        self.logger.debug(f"[Flight Tracker] Generated map background with {tiles_fetched} tiles at zoom {zoom}")
+        self.logger.info(f"[Flight Tracker] Center: ({center_lat:.4f}, {center_lon:.4f}), Radius: {self.map_radius_miles}mi, Effective: {effective_radius:.2f}mi (zoom_factor: {self.zoom_factor})")
+        self.logger.debug(f"[Flight Tracker] Tile coverage: {tiles_x}x{tiles_y}, Crop: ({crop_left},{crop_top})-({crop_right},{crop_bottom})")
+        self.logger.debug(f"[Flight Tracker] Map displays {desired_miles_wide:.1f} miles wide x {desired_miles_high:.1f} miles high (no stretching)")
+        self.logger.debug(f"[Flight Tracker] Native tile scale: {pixels_per_mile_at_zoom:.3f} pixels/mile, cropped {crop_width_needed}x{crop_height_needed} pixels, scaled to {self.display_width}x{self.display_height}")
         
         # Debug: Save composite image to see what's happening
         try:
             debug_composite = Path("debug_composite.png")
             composite.save(debug_composite)
-            logger.debug(f"[Flight Tracker] Saved composite to: {debug_composite}")
+            self.logger.debug(f"[Flight Tracker] Saved composite to: {debug_composite}")
             
             debug_cropped = Path("debug_cropped.png")
             cropped.save(debug_cropped)
-            logger.debug(f"[Flight Tracker] Saved cropped to: {debug_cropped}")
+            self.logger.debug(f"[Flight Tracker] Saved cropped to: {debug_cropped}")
         except Exception as e:
-            logger.debug(f"[Flight Tracker] Could not save debug images: {e}")
+            self.logger.debug(f"[Flight Tracker] Could not save debug images: {e}")
         
         return cropped
     
@@ -1755,24 +1900,27 @@ class FlightTrackerPlugin(BasePlugin):
             self.last_fetch = current_time
 
             if self.data_source == 'flightradar24':
-                logger.info("[Flight Tracker] Fetching aircraft data from FlightRadar24")
+                self.logger.info("[Flight Tracker] Fetching aircraft data from FlightRadar24")
                 self._update_from_fr24()
-                logger.info(f"[Flight Tracker] Currently tracking {len(self.aircraft_data)} aircraft")
+                self.logger.info(f"[Flight Tracker] Currently tracking {len(self.aircraft_data)} aircraft")
             else:
-                logger.info(f"[Flight Tracker] Fetching aircraft data from {self.skyaware_url}")
+                self.logger.info(f"[Flight Tracker] Fetching aircraft data from {self.skyaware_url}")
                 data = self._fetch_aircraft_data()
                 if data:
-                    logger.info("[Flight Tracker] Received data, processing aircraft...")
+                    self.logger.info("[Flight Tracker] Received data, processing aircraft...")
                     self._process_aircraft_data(data)
-                    logger.info(f"[Flight Tracker] Currently tracking {len(self.aircraft_data)} aircraft")
+                    self.logger.info(f"[Flight Tracker] Currently tracking {len(self.aircraft_data)} aircraft")
                     # Queue interesting callsigns for background FlightAware fetching
                     self._queue_interesting_callsigns()
                 else:
-                    logger.warning("[Flight Tracker] No data received from SkyAware")
+                    self.logger.warning("[Flight Tracker] No data received from SkyAware")
 
                 # FR24 enrichment for SkyAware users
                 if self.fr24_enrichment:
                     self._maybe_refresh_fr24_enrichment()
+
+                # Enrich remaining aircraft with offline DB (aircraft type)
+                self._enrich_from_offline_db()
 
             self.last_update = current_time
 
@@ -1785,7 +1933,7 @@ class FlightTrackerPlugin(BasePlugin):
                 not self.fr24_enrichment and
                 self.background_service_enabled and
                 current_time - self.last_background_fetch >= self.background_fetch_interval):
-            logger.info("[Flight Tracker] Running background service for flight plans")
+            self.logger.info("[Flight Tracker] Running background service for flight plans")
             self._background_fetch_flight_plans()
             self.last_background_fetch = current_time
 
@@ -1863,7 +2011,7 @@ class FlightTrackerPlugin(BasePlugin):
                         if enriched.arrival_time:
                             tf.arrival_time = enriched.arrival_time
                 except (requests.RequestException, KeyError, ValueError, TypeError) as e:
-                    logger.warning(f"[Flight Tracker] Enrichment lookup failed for {ident}: {e}")
+                    self.logger.warning(f"[Flight Tracker] Enrichment lookup failed for {ident}: {e}")
 
             tf.last_updated = time.time()
             self.tracked_flight_data[ident] = tf
@@ -1888,7 +2036,7 @@ class FlightTrackerPlugin(BasePlugin):
         if not self.pending_flight_plans:
             return
         
-        logger.info(f"[Flight Tracker] Background fetching {len(self.pending_flight_plans)} flight plans")
+        self.logger.info(f"[Flight Tracker] Background fetching {len(self.pending_flight_plans)} flight plans")
         
         # Sort by priority (lower number = higher priority)
         sorted_plans = sorted(self.pending_flight_plans, key=lambda x: x[0])
@@ -1902,11 +2050,11 @@ class FlightTrackerPlugin(BasePlugin):
                 # Fetch flight plan data
                 flight_plan = self._get_flight_plan_data(callsign)
                 if flight_plan and flight_plan.get('origin') != 'Unknown':
-                    logger.info(f"[Flight Tracker] Background fetched (priority {priority}): {callsign} -> {flight_plan['origin']}-{flight_plan['destination']}")
+                    self.logger.info(f"[Flight Tracker] Background fetched (priority {priority}): {callsign} -> {flight_plan['origin']}-{flight_plan['destination']}")
                 
                 self.pending_flight_plans.remove((priority, callsign))
             else:
-                logger.warning(f"[Flight Tracker] Rate limit reached, deferring {len(self.pending_flight_plans)} callsigns")
+                self.logger.warning(f"[Flight Tracker] Rate limit reached, deferring {len(self.pending_flight_plans)} callsigns")
                 break
     
     def get_closest_aircraft(self) -> Optional[Dict]:
@@ -2029,13 +2177,13 @@ class FlightTrackerPlugin(BasePlugin):
                     if captured is not None:
                         images.append(captured.copy())
                 except Exception as e:
-                    logger.debug(f"[Flight Tracker] Failed to render stat slot {slot}: {e}", exc_info=True)
+                    self.logger.debug(f"[Flight Tracker] Failed to render stat slot {slot}: {e}", exc_info=True)
             self.current_stat = saved_stat
             self.last_stat_change = saved_time
             return images if images else None
 
         except Exception as e:
-            logger.warning(f"[Flight Tracker] get_vegas_content() failed: {e}")
+            self.logger.warning(f"[Flight Tracker] get_vegas_content() failed: {e}")
             return None
 
     def display(self, force_clear: bool = False, *, display_mode: Optional[str] = None) -> None:
@@ -2061,12 +2209,7 @@ class FlightTrackerPlugin(BasePlugin):
             self.display_mode, display_mode, mode, aircraft_count,
         )
         if mode == 'auto':
-            # Auto mode priority:
-            # 1. Tracked flight airborne → flight_tracking
-            # 2. Proximity alert → overhead
-            # 3. Anchor airport with matches → area
-            # 4. Aircraft in range → map
-            # 5. No aircraft → stats
+            # Priority interrupts — always show these immediately
             has_airborne_tracked = any(
                 tf.status == "AIRBORNE" for tf in self.tracked_flight_data.values()
             )
@@ -2074,12 +2217,23 @@ class FlightTrackerPlugin(BasePlugin):
                 mode = 'flight_tracking'
             elif self.proximity_enabled and closest and closest['distance_miles'] <= self.proximity_distance_miles:
                 mode = 'overhead'
-            elif self.anchor_airport and self._get_anchor_aircraft():
-                mode = 'area'
-            elif self.aircraft_data:
-                mode = 'map'
             else:
-                mode = 'stats'
+                # Rotate through available modes
+                auto_modes = []
+                if self.aircraft_data:
+                    auto_modes.append('map')
+                    auto_modes.append('area')
+                if self.all_aircraft_data or self.aircraft_data:
+                    auto_modes.append('stats')
+                if not auto_modes:
+                    auto_modes = ['stats']
+
+                now = time.time()
+                if now - self._auto_mode_last_change >= self._auto_rotate_interval:
+                    self._auto_mode_index = (self._auto_mode_index + 1) % len(auto_modes)
+                    self._auto_mode_last_change = now
+
+                mode = auto_modes[self._auto_mode_index % len(auto_modes)]
 
             self.logger.debug(
                 "[Flight Tracker] Auto mode selection: chosen_mode=%s (aircraft=%s)",
@@ -2087,6 +2241,8 @@ class FlightTrackerPlugin(BasePlugin):
             )
         else:
             self.logger.debug("[Flight Tracker] Manual mode selection: chosen_mode=%s", mode)
+
+        self.logger.info("[Flight Tracker] display(): mode=%s, aircraft=%d", mode, aircraft_count)
 
         # Route to appropriate display method
         try:
@@ -2104,7 +2260,11 @@ class FlightTrackerPlugin(BasePlugin):
                 self.logger.warning(f"Unknown display_mode: {mode!r}, using map")
                 self._display_map(force_clear)
         except Exception:
-            logger.exception("[Flight Tracker] display() error in mode %s", mode)
+            self.logger.exception("[Flight Tracker] display() error in mode %s", mode)
+            try:
+                self._renderer.render_error(f"ERR:{mode}")
+            except Exception:
+                self.logger.exception("[Flight Tracker] Failed to render error fallback")
     
     # -------------------------------------------------------------------------
     # New display modes (delegated to renderer.py)
@@ -2440,28 +2600,28 @@ class FlightTrackerPlugin(BasePlugin):
         self.display_manager.update_display()
     
     def _display_stats(self, force_clear: bool = False) -> None:
-        """Display flight statistics."""
+        """Display flight statistics using the renderer's stat card layout.
+
+        Uses all_aircraft_data (full ADS-B range) so stats reflect the true
+        highest/fastest/closest across everything the receiver can see, not
+        just the map_radius_miles subset.
+        """
         if force_clear:
             self.display_manager.clear()
 
+        # Use full-range data for stats; fall back to radius-filtered if empty
+        stats_pool = self.all_aircraft_data or self.aircraft_data
         has_records = self.flight_records_enabled and (self._closest_record or self._farthest_record)
 
-        if not self.aircraft_data and not has_records:
-            # No aircraft and no records to display
-            img = Image.new('RGB', (self.display_width, self.display_height), (0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            self._draw_text_with_outline(draw, "No Aircraft",
-                                       (self.display_width // 2 - 30, self.display_height // 2 - 4),
-                                       self.fonts['medium'], fill=(200, 200, 200), outline_color=(0, 0, 0))
-            self.display_manager.image = img.copy()
-            self.display_manager.update_display()
+        if not stats_pool and not has_records:
+            self._renderer.render_error("No Aircraft")
             return
 
         # When no live aircraft but records exist, jump straight to a record slot
-        if not self.aircraft_data and has_records:
+        if not stats_pool and has_records:
             if self.current_stat < 3:
-                self.current_stat = 3  # Jump to REC CLOSE
-        
+                self.current_stat = 3
+
         # Rotate stats every 10 seconds
         # Slots: 0=Closest, 1=Fastest, 2=Highest, 3=Record Closest, 4=Record Farthest
         current_time = time.time()
@@ -2470,347 +2630,94 @@ class FlightTrackerPlugin(BasePlugin):
             self.current_stat = (self.current_stat + 1) % num_stats
             self.last_stat_change = current_time
 
-        # Create image
-        img = Image.new('RGB', (self.display_width, self.display_height), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        # Determine layout based on display size
-        dsize = self._display_size()
-        is_small_display = dsize in ('tiny', 'small')
-
-        # Get statistics
+        # Resolve which aircraft/record to show
+        aircraft = None
         record_data = None
+        title = ""
+        title_color = (255, 255, 255)
+        stat_label = ""
+        stat_value = ""
 
         if self.current_stat == 0:
-            aircraft = min(self.aircraft_data.values(), key=lambda a: a['distance_miles'])
+            aircraft = min(stats_pool.values(), key=lambda a: a['distance_miles'])
             title = "CLOSEST"
             title_color = (255, 100, 0)
+            stat_label = "DST"
+            stat_value = format_distance(aircraft['distance_miles'], self._renderer.units_legacy)
         elif self.current_stat == 1:
-            aircraft = max(self.aircraft_data.values(), key=lambda a: a['speed'])
+            aircraft = max(stats_pool.values(), key=lambda a: a['speed'])
             title = "FASTEST"
             title_color = (0, 255, 100)
+            stat_label = "SPD"
+            stat_value = self._renderer._fmt_spd(aircraft['speed'])
         elif self.current_stat == 2:
-            aircraft = max(self.aircraft_data.values(), key=lambda a: a['altitude'])
+            aircraft = max(stats_pool.values(), key=lambda a: a['altitude'])
             title = "HIGHEST"
             title_color = (100, 150, 255)
-        elif self.current_stat == 3:
-            # Record: all-time closest
-            if self._closest_record:
-                record_data = self._closest_record
-                aircraft = None
-                title = "REC CLOSE"
-                title_color = (255, 80, 0)
-            else:
-                # No record yet — fall back to closest live
-                aircraft = min(self.aircraft_data.values(), key=lambda a: a['distance_miles'])
+            stat_label = "ALT"
+            stat_value = self._renderer._fmt_alt(aircraft['altitude'])
+        elif self.current_stat == 3 and self._closest_record:
+            record_data = self._closest_record
+            title = "REC CLOSE"
+            title_color = (255, 80, 0)
+            stat_label = "DST"
+            stat_value = format_distance(record_data['distance_miles'], self._renderer.units_legacy)
+        elif self.current_stat == 4 and self._farthest_record:
+            record_data = self._farthest_record
+            title = "REC FAR"
+            title_color = (80, 150, 255)
+            stat_label = "DST"
+            stat_value = format_distance(record_data['distance_miles'], self._renderer.units_legacy)
+        else:
+            # Fallback to closest live
+            if stats_pool:
+                aircraft = min(stats_pool.values(), key=lambda a: a['distance_miles'])
                 title = "CLOSEST"
                 title_color = (255, 100, 0)
-        else:
-            # Record: all-time farthest
-            if self._farthest_record:
-                record_data = self._farthest_record
-                aircraft = None
-                title = "REC FAR"
-                title_color = (80, 150, 255)
+                stat_label = "DST"
+                stat_value = format_distance(aircraft['distance_miles'], self._renderer.units_legacy)
             else:
-                aircraft = max(self.aircraft_data.values(), key=lambda a: a['distance_miles'])
-                title = "FARTHEST"
-                title_color = (80, 150, 255)
-        
-        # If showing a record snapshot, extract data directly from it
+                self._renderer.render_error("No Data")
+                return
+
+        # Build the data for the renderer
         if record_data:
-            callsign_disp = record_data.get('callsign', '?')
-            origin = record_data.get('origin') or 'Unknown'
-            destination = record_data.get('destination') or 'Unknown'
-            aircraft_type = record_data.get('aircraft_type') or 'Unknown'
-            airline_name = record_data.get('airline_name') or ''
-            dist_disp = f"{record_data['distance_miles']:.2f}mi"
-            alt_disp = f"{int(record_data.get('altitude', 0))}ft"
-            spd_disp = f"{int(record_data.get('speed', 0))}kt"
+            ac_data = record_data
+            origin = record_data.get('origin', '')
+            destination = record_data.get('destination', '')
+            aircraft_type = record_data.get('aircraft_type', '')
+            airline_icao = record_data.get('airline_icao', '')
             rec_ts = record_data.get('timestamp', '')
             if rec_ts:
                 try:
                     rec_ts = datetime.fromisoformat(rec_ts).strftime('%m/%d %H:%M')
                 except ValueError:
                     pass
-            manufacturer = 'Unknown'
-            model = 'Unknown'
-            if aircraft_type and aircraft_type != 'Unknown':
-                parts = aircraft_type.split(' ', 1)
-                manufacturer, model = (parts[0], parts[1]) if len(parts) == 2 else ('', aircraft_type)
-            show_route = origin != 'Unknown' and destination != 'Unknown'
-            operator = airline_name or 'Unknown'
-            # Render record display and return early
-            if is_small_display:
-                y_offset = 1
-                self._draw_text_with_outline(draw, title, (2, y_offset),
-                                            self.fonts['title_medium'], fill=title_color, outline_color=(0, 0, 0))
-                y_offset += self._calculate_line_spacing(self.fonts['title_medium'])
-                self._draw_text_smart(draw, callsign_disp, (2, y_offset),
-                                    self.fonts['data_small'], fill=(255, 255, 255), use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_small'])
-                self._draw_text_smart(draw, dist_disp, (2, y_offset),
-                                    self.fonts['data_medium'], fill=title_color, use_outline=False)
-                if show_route and y_offset + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                    right_x = self.display_width - 60
-                    self._draw_text_smart(draw, f"FROM:{origin}", (right_x, 1),
-                                        self.fonts['data_small'], fill=(150, 255, 150), use_outline=False)
-                    self._draw_text_smart(draw, f"TO:{destination}", (right_x, 1 + self._calculate_line_spacing(self.fonts['data_small'])),
-                                        self.fonts['data_small'], fill=(150, 255, 150), use_outline=False)
-                if rec_ts:
-                    self._draw_text_smart(draw, rec_ts, (2, self.display_height - 8),
-                                        self.fonts['data_small'], fill=(120, 120, 120), use_outline=False)
-            else:
-                y_offset = 4
-                self._draw_text_with_outline(draw, title, (self.display_width // 2 - 30, y_offset),
-                                            self.fonts['title_large'], fill=title_color, outline_color=(0, 0, 0))
-                y_offset += self._calculate_line_spacing(self.fonts['title_large']) + 4
-                self._draw_text_smart(draw, f"Callsign: {callsign_disp}", (4, y_offset),
-                                    self.fonts['data_large'], fill=(255, 255, 255), use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_large'])
-                self._draw_text_smart(draw, f"Distance: {dist_disp}", (4, y_offset),
-                                    self.fonts['data_large'], fill=title_color, use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_large']) + 2
-                if y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                    self._draw_text_smart(draw, f"Aircraft: {aircraft_type}", (4, y_offset),
-                                        self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                    y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-                if y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                    self._draw_text_smart(draw, f"{alt_disp}  {spd_disp}", (4, y_offset),
-                                        self.fonts['data_medium'], fill=(180, 180, 255), use_outline=False)
-                    y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-                if show_route:
-                    right_x = self.display_width - 80
-                    right_y = 4
-                    if right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                        self._draw_text_smart(draw, f"From: {origin}", (right_x, right_y),
-                                            self.fonts['data_medium'], fill=(150, 255, 150), use_outline=False)
-                        right_y += self._calculate_line_spacing(self.fonts['data_medium'])
-                    if right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                        self._draw_text_smart(draw, f"To: {destination}", (right_x, right_y),
-                                            self.fonts['data_medium'], fill=(150, 255, 150), use_outline=False)
-                if rec_ts:
-                    self._draw_text_smart(draw, rec_ts, (4, self.display_height - 10),
-                                        self.fonts['data_small'], fill=(120, 120, 120), use_outline=False)
-            self.display_manager.image = img.copy()
-            self.display_manager.update_display()
-            return
-
-        # Get flight plan data once and cache it for this display cycle
-        # Pass ICAO24 for offline database / FR24 enrichment lookup
-        flight_plan = self._get_flight_plan_data(aircraft['callsign'], aircraft.get('icao'))
-        origin = flight_plan.get('origin', 'Unknown')
-        destination = flight_plan.get('destination', 'Unknown')
-        aircraft_type = flight_plan.get('aircraft_type', 'Unknown')
-        airline_name = flight_plan.get('airline_name') or aircraft.get('airline_name') or ''
-
-        # Parse manufacturer and model from aircraft_type
-        manufacturer = 'Unknown'
-        model = 'Unknown'
-
-        if aircraft_type and aircraft_type != 'Unknown':
-            # Try to split manufacturer and model (e.g., "Boeing 737-800")
-            parts = aircraft_type.split(' ', 1)
-            if len(parts) == 2:
-                manufacturer = parts[0]
-                model = parts[1]
-            else:
-                # If we can't split, use aircraft_type as model
-                model = aircraft_type
-
-        # Get operator/owner from flight plan data or airline name
-        operator = airline_name or flight_plan.get('operator', 'Unknown')
-        if operator == 'Unknown':
-            operator = flight_plan.get('owner_name', 'Unknown')
-
-        # Log if we used offline database
-        if flight_plan.get('source') == 'offline_db':
-            logger.debug(f"[Flight Tracker] Using offline database for {aircraft['callsign']}: {manufacturer} {model}")
-
-        # Improve aircraft type display with better categorization if still unknown
-        if model == 'Unknown':
-            categorized = self._categorize_aircraft(aircraft['callsign'])
-            if categorized != 'Unknown':
-                model = categorized
-            # Log uncategorized aircraft for debugging
-            if model == 'Unknown':
-                logger.debug(f"[Flight Tracker] Unclassified aircraft: {aircraft['callsign']}")
-
-        # Determine if we should show origin/destination
-        # Show route if we have it from any source (FR24, FlightAware, or offline DB)
-        show_route = (origin != 'Unknown' and destination != 'Unknown')
-
-        # Flight progress
-        progress = self._compute_flight_progress(aircraft)
-        delay_str = self._format_delay(aircraft)
-        
-        if dsize == 'tiny':
-            # Tiny display: title abbreviation + callsign + key stat only
-            title_abbr = title[:4]  # e.g. "CLOS", "FAST", "HIGH"
-            self._draw_text_smart(draw, f"{title_abbr}:{aircraft['callsign']}", (1, 1),
-                                self.fonts['data_small'], fill=title_color, use_outline=False)
-            if self.current_stat == 0:
-                stat_text = f"{aircraft['distance_miles']:.1f}mi"
-            elif self.current_stat == 1:
-                stat_text = f"{int(aircraft['speed'])}kt"
-            else:
-                stat_text = f"{int(aircraft['altitude'])}ft"
-            y2 = self._calculate_line_spacing(self.fonts['data_small']) + 1
-            if y2 < self.display_height:
-                self._draw_text_smart(draw, stat_text, (1, y2),
-                                    self.fonts['data_small'], fill=aircraft['color'], use_outline=False)
-            if show_route:
-                y3 = y2 + self._calculate_line_spacing(self.fonts['data_small'])
-                if y3 < self.display_height:
-                    self._draw_text_smart(draw, f"{origin}-{destination}", (1, y3),
-                                        self.fonts['data_small'], fill=(150, 255, 150), use_outline=False)
-
-        elif is_small_display:
-            # Small display layout with dynamic spacing
-            y_offset = 1
-
-            # Title
-            self._draw_text_with_outline(draw, title, (2, y_offset),
-                                       self.fonts['title_medium'], fill=title_color, outline_color=(0, 0, 0))
-            y_offset += self._calculate_line_spacing(self.fonts['title_medium'])
-
-            # Callsign
-            self._draw_text_smart(draw, aircraft['callsign'], (2, y_offset),
-                                self.fonts['data_small'], fill=(255, 255, 255), use_outline=False)
-            y_offset += self._calculate_line_spacing(self.fonts['data_small'])
-
-            # Key stat
-            if self.current_stat == 0:
-                stat_text = f"{aircraft['distance_miles']:.2f}mi"
-            elif self.current_stat == 1:
-                stat_text = f"{int(aircraft['speed'])}kt"
-            else:
-                stat_text = f"{int(aircraft['altitude'])}ft"
-
-            self._draw_text_smart(draw, stat_text, (2, y_offset),
-                                self.fonts['data_medium'], fill=aircraft['color'], use_outline=False)
-            y_offset += self._calculate_line_spacing(self.fonts['data_medium']) + 1
-
-            # Additional info only if space
-            if y_offset + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                self._draw_text_smart(draw, f"ALT:{int(aircraft['altitude'])} SPD:{int(aircraft['speed'])}", (2, y_offset),
-                                    self.fonts['data_small'], fill=(150, 150, 150), use_outline=False)
-
-            # Right side info
-            right_x = self.display_width - 60
-            right_y = 1
-
-            # Operator/airline
-            if operator and operator != 'Unknown' and right_y + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                op_disp = operator[:12] if len(operator) > 12 else operator
-                self._draw_text_smart(draw, f"OPR:{op_disp}", (right_x, right_y),
-                                    self.fonts['data_small'], fill=(200, 200, 200), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_small'])
-
-            # Model
-            if model and model != 'Unknown' and right_y + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                self._draw_text_smart(draw, f"MDL:{model[:10]}", (right_x, right_y),
-                                    self.fonts['data_small'], fill=(200, 200, 200), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_small'])
-
-            # Route
-            if show_route and right_y + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                route_disp = f"{origin}->{destination}"
-                if progress is not None:
-                    route_disp += f" {int(progress * 100)}%"
-                self._draw_text_smart(draw, route_disp, (right_x, right_y),
-                                    self.fonts['data_small'], fill=(150, 255, 150), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_small'])
-
-            # Delay
-            if delay_str and right_y + self._calculate_line_spacing(self.fonts['data_small']) <= self.display_height:
-                self._draw_text_smart(draw, delay_str, (right_x, right_y),
-                                    self.fonts['data_small'], fill=self._delay_color(delay_str), use_outline=False)
+            if not airline_icao:
+                cs = record_data.get('callsign', '')
+                if cs and len(cs) >= 4 and cs[:3].isalpha():
+                    airline_icao = cs[:3].upper()
         else:
-            # Large display layout with dynamic spacing
-            y_offset = 4
+            ac_data = aircraft
+            # Read only pre-enriched fields — no I/O during rendering
+            origin = aircraft.get('origin', '')
+            destination = aircraft.get('destination', '')
+            aircraft_type = aircraft.get('aircraft_type', '')
+            airline_icao = aircraft.get('airline_icao', '')
 
-            # Title
-            self._draw_text_with_outline(draw, title, (self.display_width // 2 - 30, y_offset),
-                                       self.fonts['title_large'], fill=title_color, outline_color=(0, 0, 0))
-            y_offset += self._calculate_line_spacing(self.fonts['title_large']) + 4
+        self._renderer.render_stat_card(
+            title=title,
+            title_color=title_color,
+            aircraft=ac_data,
+            stat_label=stat_label,
+            stat_value=stat_value,
+            origin=origin,
+            destination=destination,
+            aircraft_type=aircraft_type,
+            airline_icao=airline_icao,
+            record_time=rec_ts if record_data else "",
+        )
 
-            # Callsign + optional airline
-            callsign_line = f"Callsign: {aircraft['callsign']}"
-            if airline_name:
-                callsign_line += f"  ({airline_name[:16]})"
-            self._draw_text_smart(draw, callsign_line, (4, y_offset),
-                                self.fonts['data_large'], fill=(255, 255, 255), use_outline=False)
-            y_offset += self._calculate_line_spacing(self.fonts['data_large'])
-
-            # Key statistic
-            if self.current_stat == 0:
-                self._draw_text_smart(draw, f"Distance: {aircraft['distance_miles']:.2f} miles", (4, y_offset),
-                                    self.fonts['data_large'], fill=title_color, use_outline=False)
-            elif self.current_stat == 1:
-                self._draw_text_smart(draw, f"Speed: {int(aircraft['speed'])} knots", (4, y_offset),
-                                    self.fonts['data_large'], fill=title_color, use_outline=False)
-            else:
-                self._draw_text_smart(draw, f"Altitude: {int(aircraft['altitude'])} ft", (4, y_offset),
-                                    self.fonts['data_large'], fill=title_color, use_outline=False)
-            y_offset += self._calculate_line_spacing(self.fonts['data_large']) + 2
-
-            if y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Altitude: {int(aircraft['altitude'])} ft", (4, y_offset),
-                                    self.fonts['data_medium'], fill=aircraft['color'], use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Speed: {int(aircraft['speed'])} knots", (4, y_offset),
-                                    self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Distance: {aircraft['distance_miles']:.2f} miles", (4, y_offset),
-                                    self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if aircraft['heading'] and y_offset + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Heading: {int(aircraft['heading'])}°", (4, y_offset),
-                                    self.fonts['data_medium'], fill=(150, 150, 150), use_outline=False)
-                y_offset += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            # Right side info
-            right_x = self.display_width - 80
-            right_y = 4
-
-            if manufacturer and manufacturer != 'Unknown' and right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Manufacturer: {manufacturer}", (right_x, right_y),
-                                    self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if model and model != 'Unknown' and right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Model: {model}", (right_x, right_y),
-                                    self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if operator and operator != 'Unknown' and right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                op_disp = operator[:20] if len(operator) > 20 else operator
-                self._draw_text_smart(draw, f"Operator: {op_disp}", (right_x, right_y),
-                                    self.fonts['data_medium'], fill=(200, 200, 200), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if show_route and right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                route_disp = f"From: {origin}  To: {destination}"
-                if progress is not None:
-                    route_disp += f"  ({int(progress * 100)}%)"
-                self._draw_text_smart(draw, route_disp, (right_x, right_y),
-                                    self.fonts['data_medium'], fill=(150, 255, 150), use_outline=False)
-                right_y += self._calculate_line_spacing(self.fonts['data_medium'])
-
-            if delay_str and right_y + self._calculate_line_spacing(self.fonts['data_medium']) <= self.display_height:
-                self._draw_text_smart(draw, f"Status: {delay_str}", (right_x, right_y),
-                                    self.fonts['data_medium'], fill=self._delay_color(delay_str), use_outline=False)
-        
-        # Display the image
-        self.display_manager.image = img.copy()
-        self.display_manager.update_display()
-    
     def has_live_content(self) -> bool:
         """Check if plugin has live/urgent content (proximity alerts)."""
         if not self.proximity_enabled:
@@ -2861,8 +2768,8 @@ class FlightTrackerPlugin(BasePlugin):
             return False
         
         # Validate FlightAware API key if flight plans are enabled
-        flight_plan_enabled = self.config.get('flight_plan_enabled', False)
-        api_key = self.config.get('flightaware_api_key', '')
+        flight_plan_enabled = self._fa_config('enabled', False)
+        api_key = self._fa_config('api_key', '')
         if flight_plan_enabled and not api_key:
             self.logger.warning(
                 "Flight plans are enabled but no FlightAware API key is configured. "
