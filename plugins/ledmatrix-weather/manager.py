@@ -315,12 +315,15 @@ class WeatherPlugin(BasePlugin):
         Fetches current conditions and forecast data, respecting
         update intervals and error backoff periods.
         """
+        # Refresh radar tiles unconditionally (uses RainViewer, not OpenWeatherMap)
+        self._update_radar()
+
         current_time = time.time()
-        
+
         # Check if we need to update
         if current_time - self.last_update < self.update_interval:
             return
-        
+
         # Check if we're in error backoff period
         if self.consecutive_errors >= self.max_consecutive_errors:
             if current_time - self.last_error_time < self.error_backoff_time:
@@ -330,12 +333,12 @@ class WeatherPlugin(BasePlugin):
                 # Reset error count after backoff
                 self.consecutive_errors = 0
                 self.error_backoff_time = 60
-        
+
         # Validate API key
         if not self.api_key or self.api_key == "YOUR_OPENWEATHERMAP_API_KEY":
             self.logger.warning("No valid OpenWeatherMap API key configured")
             return
-        
+
         # Try to fetch weather data
         try:
             self._fetch_weather()
@@ -357,7 +360,47 @@ class WeatherPlugin(BasePlugin):
                 if self.consecutive_errors >= self.max_consecutive_errors:
                     self.logger.error(f"Weather API disabled for {self.error_backoff_time} seconds due to repeated failures")
                 self.last_error_log_time = current_time
-    
+
+    def _update_radar(self) -> None:
+        """Refresh radar data in the update loop so display() never blocks on HTTP."""
+        if not self.show_radar:
+            return
+        try:
+            self._ensure_radar_fetcher()
+            if hasattr(self, '_radar_fetcher') and self._radar_fetcher.needs_refresh(self.radar_update_interval):
+                width = self.display_manager.matrix.width
+                height = self.display_manager.matrix.height
+                self._radar_fetcher.refresh_data(width, height)
+        except Exception as e:
+            self.logger.exception("Error refreshing radar data")
+
+    def _ensure_radar_fetcher(self) -> None:
+        """Create or recreate the RadarFetcher when config or coordinates change."""
+        lat = None
+        lon = None
+        if self.forecast_data:
+            lat = self.forecast_data.get('lat')
+            lon = self.forecast_data.get('lon')
+        if lat is None or lon is None:
+            return
+
+        line_color = tuple(self.config.get('radar_line_color', [0, 130, 70]))
+        fill_color = tuple(self.config.get('radar_fill_color', [15, 25, 15]))
+
+        # Reuse existing fetcher if config hasn't changed
+        if hasattr(self, '_radar_fetcher'):
+            f = self._radar_fetcher
+            if (f.lat == lat and f.lon == lon and f.zoom == self.radar_zoom
+                    and f.line_color == line_color and f.fill_color == fill_color):
+                return
+            self.logger.info("Radar config changed, recreating RadarFetcher")
+
+        from radar import RadarFetcher
+        self._radar_fetcher = RadarFetcher(
+            lat, lon, self.radar_zoom, self.cache_manager,
+            line_color=line_color, fill_color=fill_color,
+        )
+
     def _fetch_weather(self) -> None:
         """Fetch weather data from OpenWeatherMap API."""
         # Check cache first - use update_interval as max_age to respect configured refresh rate
@@ -1141,24 +1184,16 @@ class WeatherPlugin(BasePlugin):
     # --- Radar Display Mode ---
 
     def _display_radar(self) -> None:
-        """Display animated radar imagery composited over map background."""
+        """Display animated radar imagery composited over map background.
+
+        Radar tile fetching is handled by _update_radar() in the update loop.
+        This method only composites and displays cached frames.
+        """
         try:
-            from radar import RadarFetcher
+            self._ensure_radar_fetcher()
             if not hasattr(self, '_radar_fetcher'):
-                lat = None
-                lon = None
-                if self.forecast_data:
-                    lat = self.forecast_data.get('lat')
-                    lon = self.forecast_data.get('lon')
-                if lat is None or lon is None:
-                    self._display_no_data()
-                    return
-                line_color = tuple(self.config.get('radar_line_color', [0, 130, 70]))
-                fill_color = tuple(self.config.get('radar_fill_color', [15, 25, 15]))
-                self._radar_fetcher = RadarFetcher(
-                    lat, lon, self.radar_zoom, self.cache_manager,
-                    line_color=line_color, fill_color=fill_color,
-                )
+                self._display_no_data()
+                return
 
             width = self.display_manager.matrix.width
             height = self.display_manager.matrix.height
@@ -1169,9 +1204,6 @@ class WeatherPlugin(BasePlugin):
                 self.display_manager.update_display()
             else:
                 self._display_no_data()
-        except ImportError:
-            self.logger.warning("radar.py module not found — radar display disabled")
-            self._display_no_data()
         except Exception as e:
             self.logger.exception("Error displaying radar")
             self._display_no_data()

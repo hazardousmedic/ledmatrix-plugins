@@ -289,34 +289,45 @@ class RadarFetcher:
         # Fetch radar frames
         path_data = self._fetch_radar_paths()
         if not path_data:
+            logger.error("[Radar] No radar paths returned from RainViewer API (%s)", _MAPS_URL)
+            self._last_fetch = time.time()
             return
 
         frames_to_fetch = path_data[-12:]
         new_frames = []
         new_timestamps = []
+        failed = 0
         for path, ts in frames_to_fetch:
             tile = self._fetch_radar_tile(path)
             if tile:
                 new_frames.append(tile)
                 new_timestamps.append(ts)
+            else:
+                failed += 1
 
         if new_frames:
             self._radar_frames = new_frames
             self._frame_timestamps = new_timestamps
             self._frame_index = 0
             logger.info(f"[Radar] Loaded {len(new_frames)} radar frames")
+            if failed:
+                logger.warning(f"[Radar] {failed}/{len(frames_to_fetch)} tile(s) failed to load")
+        else:
+            logger.error(f"[Radar] All {len(frames_to_fetch)} radar tile(s) failed to load")
 
         self._last_fetch = time.time()
+
+    def needs_refresh(self, interval: int = 300) -> bool:
+        """Return True when radar data is stale and should be refreshed."""
+        return time.time() - self._last_fetch >= interval
 
     def get_radar_image(self, width: int, height: int) -> Optional[Image.Image]:
         """Get current radar frame composited over vector map.
 
-        Auto-advances frames for animation and auto-refreshes every 5 minutes.
+        Only composites cached frames — call refresh_data() separately
+        (e.g. from the plugin's update() method) to fetch new tiles.
         """
         now = time.time()
-
-        if now - self._last_fetch >= 300:
-            self.refresh_data(width, height)
 
         if self._map_bg is None:
             self._map_bg = self._render_map(width, height)
