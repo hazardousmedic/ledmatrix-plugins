@@ -807,20 +807,25 @@ class MastersRenderer:
     # COUNTDOWN - Centered and spacious
     # ═══════════════════════════════════════════════════════════
 
+    def _draw_logo_with_glow(self, img, logo, lx, ly, glow_pad=2):
+        """Paste a logo with a black glow outline for visibility."""
+        if logo and logo.mode == "RGBA":
+            alpha = logo.split()[3]
+            shadow = Image.new("RGBA", logo.size, (0, 0, 0, 0))
+            shadow.paste((0, 0, 0), mask=alpha)
+            for ox in range(-glow_pad, glow_pad + 1):
+                for oy in range(-glow_pad, glow_pad + 1):
+                    if ox == 0 and oy == 0:
+                        continue
+                    img.paste(shadow, (lx + ox, ly + oy), shadow)
+        if logo:
+            img.paste(logo, (lx, ly), logo if logo.mode == "RGBA" else None)
+
     def render_countdown(self, days: int, hours: int, minutes: int) -> Optional[Image.Image]:
         img = self._draw_gradient_bg(COLORS["masters_dark"], COLORS["masters_green"])
         draw = ImageDraw.Draw(img)
 
-        # Masters logo centered at top
-        logo = self.logo_loader.get_masters_logo(
-            max_width=min(self.width - 10, 48),
-            max_height=min(self.height // 3, 20),
-        )
-        if logo:
-            lx = (self.width - logo.width) // 2
-            img.paste(logo, (lx, 3), logo if logo.mode == "RGBA" else None)
-
-        # Countdown number - big and centered
+        # Countdown text
         if days > 0:
             count_text = str(days)
             unit_text = "DAYS" if days > 1 else "DAY"
@@ -831,20 +836,63 @@ class MastersRenderer:
             count_text = "NOW"
             unit_text = ""
 
-        mid_y = self.height // 2
+        # Two-column layout only on large displays (width > 64)
+        min_right_width = 40
+        if self.tier == "large":
+            logo = self.logo_loader.get_masters_logo(
+                max_width=int(self.width * 0.55),
+                max_height=self.height - 6,
+            )
+            if logo and (self.width - logo.width - 12) >= min_right_width:
+                lx = 4
+                ly = (self.height - logo.height) // 2
+                self._draw_logo_with_glow(img, logo, lx, ly)
+                right_x = lx + logo.width + 6
+                right_w = self.width - right_x - 2
+                right_cx = right_x + right_w // 2
 
-        # "UNTIL THE MASTERS" centered
-        until_text = "UNTIL THE MASTERS" if self.tier != "tiny" else "TO MASTERS"
+                until_text = "UNTIL THE MASTERS"
+                utw = self._text_width(draw, until_text, self.font_detail)
+                if utw > right_w:
+                    until_text = "TO MASTERS"
+                    utw = self._text_width(draw, until_text, self.font_detail)
+
+                detail_h = self._text_height(draw, "A", self.font_detail)
+                count_h = self._text_height(draw, count_text, self.font_score)
+                block_h = detail_h + 2 + count_h + 2 + detail_h
+                block_y = max(2, (self.height - block_h) // 2)
+
+                draw.text((right_cx - utw // 2, block_y),
+                          until_text, fill=COLORS["white"], font=self.font_detail)
+                cw = self._text_width(draw, count_text, self.font_score)
+                count_y = block_y + detail_h + 2
+                self._text_shadow(draw, (right_cx - cw // 2, count_y),
+                                  count_text, self.font_score, COLORS["masters_yellow"])
+                if unit_text:
+                    uw = self._text_width(draw, unit_text, self.font_detail)
+                    draw.text((right_cx - uw // 2, count_y + count_h + 2),
+                              unit_text, fill=COLORS["light_gray"], font=self.font_detail)
+                return img
+
+        # Compact layout: logo centered at top, countdown below
+        logo = self.logo_loader.get_masters_logo(
+            max_width=min(self.width - 10, 48),
+            max_height=min(self.height // 3, 20),
+        )
+        if logo:
+            lx = (self.width - logo.width) // 2
+            self._draw_logo_with_glow(img, logo, lx, 3)
+
+        mid_y = self.height // 2
+        until_text = "TO MASTERS" if self.tier == "tiny" else "UNTIL THE MASTERS"
         uw = self._text_width(draw, until_text, self.font_detail)
         draw.text(((self.width - uw) // 2, mid_y - 6),
                   until_text, fill=COLORS["white"], font=self.font_detail)
 
-        # Big countdown number
         cw = self._text_width(draw, count_text, self.font_score)
         self._text_shadow(draw, ((self.width - cw) // 2, mid_y + 4),
                           count_text, self.font_score, COLORS["masters_yellow"])
 
-        # Unit below
         if unit_text:
             uw2 = self._text_width(draw, unit_text, self.font_detail)
             draw.text(((self.width - uw2) // 2, mid_y + 16),
