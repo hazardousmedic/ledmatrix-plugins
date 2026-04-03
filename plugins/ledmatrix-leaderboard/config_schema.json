@@ -352,6 +352,63 @@
             }
           },
           "additionalProperties": false
+        },
+        "ncaaw_basketball": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable NCAA Women's Basketball rankings"
+            },
+            "top_teams": {
+              "type": "integer",
+              "default": 25,
+              "minimum": 5,
+              "maximum": 350,
+              "description": "Number of top NCAA Women's Basketball teams to display"
+            },
+            "show_ranking": {
+              "type": "boolean",
+              "default": true,
+              "description": "Show rankings/seeds instead of sequential numbering. During March Madness, automatically shows tournament seeds."
+            }
+          },
+          "additionalProperties": false
+        },
+        "ncaa_baseball": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable NCAA Baseball standings"
+            },
+            "top_teams": {
+              "type": "integer",
+              "default": 25,
+              "minimum": 5,
+              "maximum": 350,
+              "description": "Number of top NCAA Baseball teams to display"
+            },
+            "season": {
+              "type": "string",
+              "description": "Season identifier (e.g. '2026'). Omit to use the current ESPN season."
+            },
+            "level": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1,
+              "maximum": 3,
+              "description": "Competition level (1 = Division I, 2 = Division II, 3 = Division III)"
+            },
+            "sort": {
+              "type": "string",
+              "default": "winpercent:desc,gamesbehind:asc",
+              "description": "Sort key and order for standings"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
