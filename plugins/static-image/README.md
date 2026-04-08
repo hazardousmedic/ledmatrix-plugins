@@ -26,12 +26,14 @@ Display static images on your LED matrix with automatic scaling, aspect ratio pr
 
 ## Configuration
 
-### Example Configuration
+### Single image
 
 ```json
 {
   "enabled": true,
-  "image_path": "assets/static_images/my_logo.png",
+  "images": [
+    { "id": "logo", "path": "assets/static_images/my_logo.png" }
+  ],
   "fit_to_display": true,
   "preserve_aspect_ratio": true,
   "background_color": [0, 0, 0],
@@ -39,14 +41,52 @@ Display static images on your LED matrix with automatic scaling, aspect ratio pr
 }
 ```
 
+### Multiple images with rotation
+
+```json
+{
+  "enabled": true,
+  "images": [
+    { "id": "logo_a", "path": "assets/static_images/logo_a.png" },
+    { "id": "logo_b", "path": "assets/static_images/logo_b.png" },
+    { "id": "logo_c", "path": "assets/static_images/logo_c.png" }
+  ],
+  "image_config": {
+    "mode": "multiple",
+    "rotation_mode": "sequential"
+  },
+  "rotation_settings": {
+    "sequential_loop": true
+  },
+  "image_rotation_interval": 15,
+  "fit_to_display": true,
+  "preserve_aspect_ratio": true,
+  "background_color": [0, 0, 0],
+  "display_duration": 30
+}
+```
+
 ### Configuration Options
 
-- `enabled`: Enable/disable the plugin
-- `image_path`: Path to image file (relative or absolute)
-- `fit_to_display`: Automatically fit image to display dimensions
-- `preserve_aspect_ratio`: Maintain image proportions when scaling
-- `background_color`: RGB color for transparent areas [R, G, B]
-- `display_duration`: Seconds to display the image
+The full schema lives in
+[`config_schema.json`](config_schema.json) — the web UI form is generated
+from it. Key options:
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Master switch |
+| `images` | `[]` | Array of image paths (relative to LEDMatrix root or absolute) |
+| `image_config.mode` | `"single"` | How images are presented |
+| `image_config.rotation_mode` | `"sequential"` | `"sequential"` or `"random"` when multiple images |
+| `rotation_settings.sequential_loop` | `true` | Loop back to the first image after the last |
+| `rotation_settings.random_seed` | `null` | Optional fixed seed for reproducible random order |
+| `rotation_settings.time_intervals.enabled` | `false` | Tie image changes to wall-clock intervals |
+| `rotation_settings.time_intervals.interval_seconds` | `3600` | Wall-clock interval when enabled |
+| `image_rotation_interval` | `15` | Seconds between images during rotation |
+| `fit_to_display` | `true` | Scale image to display dimensions |
+| `preserve_aspect_ratio` | `true` | Don't stretch when scaling |
+| `background_color` | `[0, 0, 0]` | RGB fill behind transparent pixels |
+| `display_duration` | `10` | Seconds the plugin holds the screen each rotation |
 
 ## Usage
 
@@ -93,20 +133,9 @@ plugin.reload_image()
 
 ### Multiple Images
 
-To rotate through multiple images, create multiple plugin instances with different IDs:
-
-```json
-{
-  "static-image-1": {
-    "enabled": true,
-    "image_path": "assets/static_images/image1.png"
-  },
-  "static-image-2": {
-    "enabled": true,
-    "image_path": "assets/static_images/image2.png"
-  }
-}
-```
+Put all the images you want to cycle through into the `images` array (see
+the multi-image example above) and set `image_config.mode` to
+`"multiple"`.
 
 ## Troubleshooting
 
@@ -135,7 +164,9 @@ To rotate through multiple images, create multiple plugin instances with differe
 ```json
 {
   "enabled": true,
-  "image_path": "assets/static_images/company_logo.png",
+  "images": [
+    { "id": "company_logo", "path": "assets/static_images/company_logo.png" }
+  ],
   "fit_to_display": true,
   "preserve_aspect_ratio": true,
   "background_color": [0, 0, 0]
@@ -146,7 +177,9 @@ To rotate through multiple images, create multiple plugin instances with differe
 ```json
 {
   "enabled": true,
-  "image_path": "assets/static_images/pixel_art.png",
+  "images": [
+    { "id": "pixel_art", "path": "assets/static_images/pixel_art.png" }
+  ],
   "fit_to_display": false,
   "preserve_aspect_ratio": true,
   "background_color": [0, 0, 50]
@@ -157,7 +190,9 @@ To rotate through multiple images, create multiple plugin instances with differe
 ```json
 {
   "enabled": true,
-  "image_path": "assets/static_images/photo.jpg",
+  "images": [
+    { "id": "photo", "path": "assets/static_images/photo.jpg" }
+  ],
   "fit_to_display": true,
   "preserve_aspect_ratio": false,
   "background_color": [0, 0, 0]

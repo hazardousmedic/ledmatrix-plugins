@@ -2,6 +2,18 @@
 
 Live, recent, and upcoming NCAA Men's and Women's Lacrosse games on your LEDMatrix display. Real-time scores, schedules, favorite-team filtering, live-game priority, poll-rank badges, and both switch and scroll display modes — modeled on the existing hockey scoreboard plugin.
 
+> ⚠️ **Known conflict with `hockey-scoreboard`.** This plugin's display
+> modes are named `ncaa_mens_recent` / `ncaa_mens_upcoming` /
+> `ncaa_mens_live` / `ncaa_womens_recent` / `ncaa_womens_upcoming` /
+> `ncaa_womens_live` — the **same names** the hockey scoreboard plugin
+> uses for its NCAA hockey divisions. The display controller stores
+> modes in a flat dict keyed by mode name
+> (`src/display_controller.py:295`), so if you install both plugins,
+> whichever loads second silently overrides the first one's NCAA modes.
+> Track the issue at the LEDMatrix repo. Until it's fixed in a
+> version-bumped release that renames lacrosse's modes (e.g.
+> `lax_ncaa_mens_*`), enable only one of the two plugins at a time.
+
 ## Features
 
 - **NCAA Men's Lacrosse** (Inside Lacrosse D1 Poll — top 20)
@@ -27,17 +39,29 @@ No API key is required.
 
 ## Installation
 
-The plugin is installable from the LEDMatrix plugin store — search for **Lacrosse Scoreboard** and enable it. On first launch, team logos for any teams appearing in the current scoreboard window will be downloaded to `assets/sports/ncaa_logos/` automatically.
+The easiest way is the Plugin Store in the LEDMatrix web UI:
 
-To install manually from source:
+1. Open `http://your-pi-ip:5000`
+2. Open the **Plugin Manager** tab
+3. Find **Lacrosse Scoreboard** in the **Plugin Store** section and click
+   **Install**
+4. Open the plugin's tab in the second nav row to configure favorite
+   teams
+
+On first launch, team logos for any teams in the current scoreboard
+window will be downloaded to `assets/sports/ncaa_logos/` automatically.
+
+Manual install from source:
 
 ```bash
 cd /path/to/LEDMatrix
 python -m pip install --user pillow requests pytz   # see requirements.txt
-cp -r /path/to/ledmatrix-plugins/plugins/lacrosse-scoreboard plugins/
+cp -r /path/to/ledmatrix-plugins/plugins/lacrosse-scoreboard plugin-repos/
+sudo systemctl restart ledmatrix
 ```
 
-Then add a `lacrosse-scoreboard` entry to your LEDMatrix `config.json` (see **Configuration** below) and restart the LEDMatrix service.
+Then add a `lacrosse-scoreboard` entry to your LEDMatrix `config.json`
+(see **Configuration** below) — or just use the web UI to configure it.
 
 ## Dependencies
 
