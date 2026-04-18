@@ -27,6 +27,7 @@ LEAGUE_NAMES = {
     'ita.1': 'Serie A',
     'fra.1': 'Ligue 1',
     'usa.1': 'MLS',
+    'por.1': 'Liga Portugal',
     'uefa.champions': 'Champions League',
     'uefa.europa': 'Europa League'
 }
@@ -375,6 +376,15 @@ def create_mls_managers(config, display_manager, cache_manager):
         SoccerLiveManager(config, display_manager, cache_manager, 'usa.1'),
         SoccerRecentManager(config, display_manager, cache_manager, 'usa.1'),
         SoccerUpcomingManager(config, display_manager, cache_manager, 'usa.1'),
+    )
+
+
+def create_liga_portugal_managers(config, display_manager, cache_manager):
+    """Create Liga Portugal (por.1) managers."""
+    return (
+        SoccerLiveManager(config, display_manager, cache_manager, 'por.1'),
+        SoccerRecentManager(config, display_manager, cache_manager, 'por.1'),
+        SoccerUpcomingManager(config, display_manager, cache_manager, 'por.1'),
     )
 
 

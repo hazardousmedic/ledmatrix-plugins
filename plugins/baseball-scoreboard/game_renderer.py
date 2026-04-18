@@ -8,7 +8,8 @@ Returns images instead of updating display directly.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+import os
+from typing import Any, Dict, Optional
 
 import pytz
 from PIL import Image, ImageDraw, ImageFont
@@ -56,26 +57,85 @@ class GameRenderer:
         # Load fonts
         self.fonts = self._load_fonts()
 
-    def _load_fonts(self):
-        """Load fonts used by the renderer."""
+    def _load_fonts(self) -> Dict[str, ImageFont.FreeTypeFont]:
+        """Load fonts used by the scoreboard from config or use defaults."""
         fonts = {}
+
+        # Get customization config
+        customization = self.config.get('customization', {})
+
+        # Load fonts from config with defaults for backward compatibility
+        score_config = customization.get('score_text', {})
+        period_config = customization.get('period_text', {})
+        team_config = customization.get('team_name', {})
+        status_config = customization.get('status_text', {})
+        detail_config = customization.get('detail_text', {})
+        rank_config = customization.get('rank_text', {})
+
         try:
-            fonts['score'] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 10)
-            fonts['time'] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 8)
-            fonts['team'] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 8)
-            fonts['status'] = ImageFont.truetype("assets/fonts/4x6-font.ttf", 6)
-            fonts['detail'] = ImageFont.truetype("assets/fonts/4x6-font.ttf", 6)
-            fonts['rank'] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 10)
-            self.logger.debug("Successfully loaded fonts")
-        except IOError:
-            self.logger.warning("Fonts not found, using default PIL font.")
-            fonts['score'] = ImageFont.load_default()
-            fonts['time'] = ImageFont.load_default()
-            fonts['team'] = ImageFont.load_default()
-            fonts['status'] = ImageFont.load_default()
-            fonts['detail'] = ImageFont.load_default()
-            fonts['rank'] = ImageFont.load_default()
+            fonts["score"] = self._load_custom_font(score_config, default_size=10)
+            fonts["time"] = self._load_custom_font(period_config, default_size=8)
+            fonts["team"] = self._load_custom_font(team_config, default_size=8)
+            fonts["status"] = self._load_custom_font(status_config, default_size=6)
+            fonts["detail"] = self._load_custom_font(detail_config, default_size=6, default_font='4x6-font.ttf')
+            fonts["rank"] = self._load_custom_font(rank_config, default_size=10)
+            self.logger.debug("Successfully loaded fonts from config")
+        except Exception as e:
+            self.logger.exception("Error loading fonts, using defaults")
+            # Fallback to hardcoded defaults
+            try:
+                fonts["score"] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 10)
+                fonts["time"] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 8)
+                fonts["team"] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 8)
+                fonts["status"] = ImageFont.truetype("assets/fonts/4x6-font.ttf", 6)
+                fonts["detail"] = ImageFont.truetype("assets/fonts/4x6-font.ttf", 6)
+                fonts["rank"] = ImageFont.truetype("assets/fonts/PressStart2P-Regular.ttf", 10)
+            except IOError:
+                self.logger.warning("Fonts not found, using default PIL font.")
+                default_font = ImageFont.load_default()
+                fonts = {k: default_font for k in ["score", "time", "team", "status", "detail", "rank"]}
+
         return fonts
+
+    def _load_custom_font(self, element_config: Dict[str, Any], default_size: int = 8, default_font: str = 'PressStart2P-Regular.ttf') -> ImageFont.FreeTypeFont:
+        """Load a custom font from an element configuration dictionary."""
+        font_name = element_config.get('font', default_font)
+        font_size = int(element_config.get('font_size', default_size))
+        font_path = os.path.join('assets', 'fonts', font_name)
+
+        try:
+            if os.path.exists(font_path):
+                if font_path.lower().endswith('.ttf') or font_path.lower().endswith('.otf'):
+                    return ImageFont.truetype(font_path, font_size)
+                elif font_path.lower().endswith('.bdf'):
+                    # BDF fonts require pre-conversion: pilfont.py font.bdf -> font.pil + font.pbm
+                    pil_font_path = font_path.rsplit('.', 1)[0] + '.pil'
+                    if os.path.exists(pil_font_path):
+                        try:
+                            return ImageFont.load(pil_font_path)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to load pre-converted BDF font {pil_font_path}: {e}")
+                    else:
+                        self.logger.warning(
+                            f"BDF font {font_name} requires conversion. "
+                            f"Run: pilfont.py {font_path}"
+                        )
+                else:
+                    self.logger.warning(f"Unknown font file type: {font_name}")
+            else:
+                self.logger.warning(f"Font file not found: {font_path}")
+        except Exception as e:
+            self.logger.warning(f"Error loading font {font_name}: {e}")
+
+        # Fallback to default font
+        default_font_path = os.path.join('assets', 'fonts', 'PressStart2P-Regular.ttf')
+        try:
+            if os.path.exists(default_font_path):
+                return ImageFont.truetype(default_font_path, font_size)
+        except Exception as e:
+            self.logger.warning(f"Error loading default font {default_font_path}: {e}")
+
+        return ImageFont.load_default()
 
     def _get_logo_path(self, league: str, team_abbrev: str) -> Path:
         """Get the logo path for a team based on league."""
@@ -218,18 +278,24 @@ class GameRenderer:
             bases_occupied = game.get('bases_occupied', [False, False, False])
             outs = game.get('outs', 0)
 
-            base_diamond_size = 7
-            out_circle_diameter = 3
-            out_vertical_spacing = 2
-            spacing_between_bases_outs = 3
+            # Read configurable game display settings
+            customization = self.config.get('customization', {})
+            bases_cfg = customization.get('bases', {})
+            outs_cfg = customization.get('outs', {})
+            count_cfg = customization.get('count', {})
+
+            base_diamond_size = bases_cfg.get('diamond_size', 7)
+            out_circle_diameter = outs_cfg.get('circle_diameter', 3)
+            out_vertical_spacing = outs_cfg.get('spacing', 2)
+            spacing_between_bases_outs = outs_cfg.get('distance_from_bases', 3)
             base_vert_spacing = 1
             base_horiz_spacing = 1
 
             base_cluster_height = base_diamond_size + base_vert_spacing + base_diamond_size
             base_cluster_width = base_diamond_size + base_horiz_spacing + base_diamond_size
 
-            overall_start_y = inning_bbox[3] + 1
-            bases_origin_x = (self.display_width - base_cluster_width) // 2
+            overall_start_y = inning_bbox[3] + 1 + bases_cfg.get('y_offset', 0)
+            bases_origin_x = (self.display_width - base_cluster_width) // 2 + bases_cfg.get('x_offset', 0)
 
             # Outs column position (only needed when count data is available)
             has_count_data = game.get('has_count_data', True)
@@ -243,8 +309,8 @@ class GameRenderer:
 
             # Draw bases as diamond polygons
             h_d = base_diamond_size // 2
-            base_fill = (255, 255, 255)
-            base_outline = (255, 255, 255)
+            base_fill = tuple(bases_cfg.get('occupied_color', [255, 255, 255]))
+            base_outline = tuple(bases_cfg.get('empty_color', [255, 255, 255]))
 
             # 2nd base (top center)
             c2x = bases_origin_x + base_cluster_width // 2
@@ -268,14 +334,16 @@ class GameRenderer:
 
             # Outs circles (only when count data is available)
             if has_count_data:
+                outs_fill = tuple(outs_cfg.get('counted_color', [255, 255, 255]))
+                outs_empty = tuple(outs_cfg.get('empty_color', [100, 100, 100]))
                 for i in range(3):
                     cx = outs_column_x
                     cy = outs_column_start_y + i * (out_circle_diameter + out_vertical_spacing)
                     coords = [cx, cy, cx + out_circle_diameter, cy + out_circle_diameter]
                     if i < outs:
-                        draw.ellipse(coords, fill=(255, 255, 255))
+                        draw.ellipse(coords, fill=outs_fill)
                     else:
-                        draw.ellipse(coords, outline=(100, 100, 100))
+                        draw.ellipse(coords, outline=outs_empty)
 
             # Balls-strikes count (below bases, only when count data is available)
             if has_count_data:
@@ -284,25 +352,26 @@ class GameRenderer:
                 count_text = f"{balls}-{strikes}"
                 count_font = self.fonts['detail']
                 count_width = draw.textlength(count_text, font=count_font)
-                count_y = overall_start_y + base_cluster_height + 2
+                count_y = overall_start_y + base_cluster_height + count_cfg.get('y_offset', 2)
                 count_x = bases_origin_x + (base_cluster_width - count_width) // 2
-                self._draw_text_with_outline(draw, count_text, (int(count_x), count_y), count_font)
+                count_text_color = tuple(count_cfg.get('text_color', [255, 255, 255]))
+                self._draw_text_with_outline(draw, count_text, (int(count_x), count_y), count_font, fill=count_text_color)
 
-            # Team:Score at bottom corners
+            # Score (centered between logos, below bases/count cluster)
             score_font = self.fonts['score']
-            away_text = f"{game.get('away_abbr', '')}:{game.get('away_score', '0')}"
-            home_text = f"{game.get('home_abbr', '')}:{game.get('home_score', '0')}"
+            score_text = f"{game.get('away_score', '0')}-{game.get('home_score', '0')}"
+            score_width = draw.textlength(score_text, font=score_font)
+            score_x = (self.display_width - score_width) // 2
             try:
                 font_height = score_font.getbbox("A")[3] - score_font.getbbox("A")[1]
             except AttributeError:
                 font_height = 8
-            score_y = self.display_height - font_height - 2
-            self._draw_text_with_outline(draw, away_text, (2, score_y), score_font)
-            try:
-                home_w = draw.textbbox((0, 0), home_text, font=score_font)[2]
-            except AttributeError:
-                home_w = len(home_text) * 8
-            self._draw_text_with_outline(draw, home_text, (self.display_width - home_w - 2, score_y), score_font)
+            cluster_bottom = overall_start_y + base_cluster_height
+            if has_count_data:
+                cluster_bottom += 2 + 6  # count spacing + detail font height
+            bottom_limit = self.display_height - font_height - 2
+            score_y = max(0, min(cluster_bottom + 1, bottom_limit))
+            self._draw_text_with_outline(draw, score_text, (int(score_x), score_y), score_font)
 
             # Odds
             if game.get('odds'):
@@ -512,6 +581,25 @@ class GameRenderer:
             home_w = home_bbox[2] - home_bbox[0]
             self._draw_text_with_outline(draw, home_text, (self.display_width - home_w, record_y), record_font)
 
+    def _get_layout_offset(self, element: str, axis: str, default: int = 0) -> int:
+        """Get layout offset for a specific element and axis from config."""
+        try:
+            layout_config = self.config.get('customization', {}).get('layout', {})
+            element_config = layout_config.get(element, {})
+            offset_value = element_config.get(axis, default)
+            if offset_value is None:
+                return default
+            if isinstance(offset_value, (int, float)):
+                return int(offset_value)
+            # Handle string values (e.g. "2.0" from config)
+            try:
+                return int(float(offset_value))
+            except (ValueError, TypeError):
+                self.logger.warning(f"Invalid layout offset for {element}.{axis}: '{offset_value}', using default {default}")
+                return default
+        except (TypeError, ValueError):
+            return default
+
     def _draw_dynamic_odds(self, draw, odds: Dict) -> None:
         """Draw odds with dynamic positioning based on favored team."""
         try:
@@ -545,9 +633,13 @@ class GameRenderer:
                 favored_spread = away_spread
                 favored_side = 'away'
 
+            # Get user-configurable layout offsets for odds
+            odds_x_offset = self._get_layout_offset('odds', 'x_offset')
+            odds_y_offset = self._get_layout_offset('odds', 'y_offset')
+
             # Odds row below the status/inning text row
-            status_bbox = draw.textbbox((0, 0), "A", font=self.fonts['time'])
-            odds_y = status_bbox[3] + 2  # just below the status row
+            status_bbox = draw.textbbox((0, 0), "A", font=self.fonts['detail'])
+            odds_y = status_bbox[3] + 2 + odds_y_offset
 
             # Show the negative spread on the appropriate side
             font = self.fonts['detail']
@@ -555,9 +647,9 @@ class GameRenderer:
                 spread_text = str(favored_spread)
                 spread_width = draw.textlength(spread_text, font=font)
                 if favored_side == 'home':
-                    spread_x = self.display_width - spread_width
+                    spread_x = self.display_width - spread_width + odds_x_offset
                 else:
-                    spread_x = 0
+                    spread_x = 0 + odds_x_offset
                 self._draw_text_with_outline(draw, spread_text, (spread_x, odds_y), font, fill=(0, 255, 0))
 
             # Show over/under on opposite side
@@ -566,11 +658,11 @@ class GameRenderer:
                 ou_text = f"O/U: {over_under}"
                 ou_width = draw.textlength(ou_text, font=font)
                 if favored_side == 'home':
-                    ou_x = 0
+                    ou_x = 0 + odds_x_offset
                 elif favored_side == 'away':
-                    ou_x = self.display_width - ou_width
+                    ou_x = self.display_width - ou_width + odds_x_offset
                 else:
-                    ou_x = (self.display_width - ou_width) // 2
+                    ou_x = (self.display_width - ou_width) // 2 + odds_x_offset
                 self._draw_text_with_outline(draw, ou_text, (ou_x, odds_y), font, fill=(0, 255, 0))
 
         except Exception:

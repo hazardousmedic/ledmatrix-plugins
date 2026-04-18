@@ -49,14 +49,6 @@ except ImportError:
             self.cache_manager = cache_manager
             self.plugin_manager = plugin_manager
 
-# Import the API counter function from web interface
-try:
-    from web_interface_v2 import increment_api_counter
-except ImportError:
-    # Fallback if web interface is not available
-    def increment_api_counter(kind: str, count: int = 1):
-        pass
-
 # Import BaseOddsManager from LEDMatrix core
 try:
     from src.base_odds_manager import BaseOddsManager
@@ -99,7 +91,6 @@ except ImportError:
 
 # Get logger
 logger = logging.getLogger(__name__)
-
 
 class OddsTickerPlugin(BasePlugin, BaseOddsManager):
     """Manager for displaying scrolling odds ticker for multiple sports leagues."""
@@ -688,8 +679,6 @@ class OddsTickerPlugin(BasePlugin, BaseOddsManager):
             response.raise_for_status()
             data = response.json()
             
-            # Increment API counter for sports data
-            increment_api_counter('sports', 1)
             
             # Different path for college sports records
             if league == 'college-football':
@@ -737,8 +726,6 @@ class OddsTickerPlugin(BasePlugin, BaseOddsManager):
             response.raise_for_status()
             data = response.json()
             
-            # Increment API counter for sports data
-            increment_api_counter('sports', 1)
             
             rankings = {}
             rankings_data = data.get('rankings', [])
@@ -819,8 +806,6 @@ class OddsTickerPlugin(BasePlugin, BaseOddsManager):
             response.raise_for_status()
             raw_data = response.json()
             
-            # Increment API counter for odds data
-            increment_api_counter('odds', 1)
             self.logger.debug(f"Received raw odds data from ESPN: {json.dumps(raw_data, indent=2)}")
             
             odds_data = self._extract_espn_data(raw_data)
@@ -1107,8 +1092,6 @@ class OddsTickerPlugin(BasePlugin, BaseOddsManager):
                         response.raise_for_status()
                         data = response.json()
                         
-                        # Increment API counter for sports data
-                        increment_api_counter('sports', 1)
                         
                         self.cache_manager.set(cache_key, data)
                         logger.debug(f"Cached scoreboard for {league} on {date} with a TTL of {ttl} seconds.")
@@ -1148,8 +1131,8 @@ class OddsTickerPlugin(BasePlugin, BaseOddsManager):
                                 away_team = next(c for c in competitors if c['homeAway'] == 'away')
                                 home_id = home_team['team']['id']
                                 away_id = away_team['team']['id']
-                                home_abbr = home_team['team']['abbreviation']
-                                away_abbr = away_team['team']['abbreviation']
+                                home_abbr = home_team['team'].get('abbreviation') or (home_team['team'].get('name') or '?')[:3]
+                                away_abbr = away_team['team'].get('abbreviation') or (away_team['team'].get('name') or '?')[:3]
                                 home_name = home_team['team'].get('name', home_abbr)
                                 away_name = away_team['team'].get('name', away_abbr)
 

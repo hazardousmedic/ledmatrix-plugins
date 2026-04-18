@@ -1,8 +1,8 @@
 {
   "id": "ledmatrix-stocks",
   "name": "Stock & Crypto Ticker",
-  "version": "2.1.0",
-  "description": "Displays scrolling stock tickers with prices, changes, and optional charts for stocks and cryptocurrencies",
+  "version": "2.2.0",
+  "description": "Displays stock tickers with prices, changes, and optional charts for stocks and cryptocurrencies. Supports scroll and switch display modes.",
   "author": "LEDMatrix Team",
   "homepage": "https://github.com/ChuckBuilds/ledmatrix-plugins/tree/main/plugins/ledmatrix-stocks",
   "entry_point": "manager.py",
@@ -40,27 +40,32 @@
   ],
   "versions": [
     {
+      "version": "2.2.0",
+      "released": "2026-03-31",
+      "ledmatrix_min_version": "2.0.0"
+    },
+    {
       "version": "2.1.0",
-      "ledmatrix_min": "2.0.0",
-      "released": "2026-03-04"
+      "released": "2026-03-04",
+      "ledmatrix_min_version": "2.0.0"
     },
     {
       "version": "2.0.3",
-      "ledmatrix_min": "2.0.0",
-      "released": "2026-03-02"
+      "released": "2026-03-02",
+      "ledmatrix_min_version": "2.0.0"
     },
     {
       "version": "2.0.2",
-      "ledmatrix_min": "2.0.0",
-      "released": "2026-02-12"
+      "released": "2026-02-12",
+      "ledmatrix_min_version": "2.0.0"
     },
     {
       "version": "2.0.1",
-      "ledmatrix_min": "2.0.0",
-      "released": "2026-02-11"
+      "released": "2026-02-11",
+      "ledmatrix_min_version": "2.0.0"
     }
   ],
-  "last_updated": "2026-03-04",
+  "last_updated": "2026-03-31",
   "stars": 0,
   "downloads": 0,
   "verified": true,

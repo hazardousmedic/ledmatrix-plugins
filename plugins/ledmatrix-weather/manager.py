@@ -43,11 +43,6 @@ except ImportError:
                 draw.ellipse([x, y, x + size, y + size], outline=(255, 255, 255), width=2)
 
 # Import API counter function
-try:
-    from web_interface_v2 import increment_api_counter
-except ImportError:
-    def increment_api_counter(kind: str, count: int = 1):
-        pass
 
 class WeatherPlugin(BasePlugin):
     """
@@ -96,6 +91,19 @@ class WeatherPlugin(BasePlugin):
         self.show_current = config.get('show_current_weather', True)
         self.show_hourly = config.get('show_hourly_forecast', True)
         self.show_daily = config.get('show_daily_forecast', True)
+        self.show_almanac = config.get('show_almanac', True)
+        self.show_radar = config.get('show_radar', True)
+        self.show_alerts = config.get('show_alerts', True)
+
+        # Enhanced current conditions toggles
+        self.show_feels_like = config.get('show_feels_like', True)
+        self.show_dew_point = config.get('show_dew_point', True)
+        self.show_visibility = config.get('show_visibility', True)
+        self.show_pressure = config.get('show_pressure', True)
+
+        # Radar config
+        self.radar_zoom = config.get('radar_zoom', 6)
+        self.radar_update_interval = config.get('radar_update_interval', 600)
         
         # Data storage
         self.weather_data = None
@@ -128,6 +136,10 @@ class WeatherPlugin(BasePlugin):
             self.modes.append('hourly_forecast')
         if self.show_daily:
             self.modes.append('daily_forecast')
+        if self.show_almanac:
+            self.modes.append('almanac')
+        if self.show_radar:
+            self.modes.append('radar')
         
         # Default to first mode if none enabled
         if not self.modes:
@@ -298,27 +310,33 @@ class WeatherPlugin(BasePlugin):
         Fetches current conditions and forecast data, respecting
         update intervals and error backoff periods.
         """
+        # Refresh radar tiles unconditionally (uses RainViewer, not OpenWeatherMap)
+        self._update_radar()
+
         current_time = time.time()
-        
+
         # Check if we need to update
         if current_time - self.last_update < self.update_interval:
             return
-        
+
         # Check if we're in error backoff period
         if self.consecutive_errors >= self.max_consecutive_errors:
             if current_time - self.last_error_time < self.error_backoff_time:
                 self.logger.debug(f"In error backoff period, retrying in {self.error_backoff_time - (current_time - self.last_error_time):.0f}s")
+                # Still reprocess forecast so past hours drop off the display
+                if self.forecast_data:
+                    self._process_forecast_data(self.forecast_data)
                 return
             else:
                 # Reset error count after backoff
                 self.consecutive_errors = 0
                 self.error_backoff_time = 60
-        
+
         # Validate API key
         if not self.api_key or self.api_key == "YOUR_OPENWEATHERMAP_API_KEY":
             self.logger.warning("No valid OpenWeatherMap API key configured")
             return
-        
+
         # Try to fetch weather data
         try:
             self._fetch_weather()
@@ -340,7 +358,52 @@ class WeatherPlugin(BasePlugin):
                 if self.consecutive_errors >= self.max_consecutive_errors:
                     self.logger.error(f"Weather API disabled for {self.error_backoff_time} seconds due to repeated failures")
                 self.last_error_log_time = current_time
-    
+
+            # Re-filter existing forecast data so past hours drop off the
+            # hourly display even when API calls are failing.
+            if self.forecast_data:
+                self._process_forecast_data(self.forecast_data)
+
+    def _update_radar(self) -> None:
+        """Refresh radar data in the update loop so display() never blocks on HTTP."""
+        if not self.show_radar:
+            return
+        try:
+            self._ensure_radar_fetcher()
+            if hasattr(self, '_radar_fetcher') and self._radar_fetcher.needs_refresh(self.radar_update_interval):
+                width = self.display_manager.matrix.width
+                height = self.display_manager.matrix.height
+                self._radar_fetcher.refresh_data(width, height)
+        except Exception as e:
+            self.logger.exception("Error refreshing radar data")
+
+    def _ensure_radar_fetcher(self) -> None:
+        """Create or recreate the RadarFetcher when config or coordinates change."""
+        lat = None
+        lon = None
+        if self.forecast_data:
+            lat = self.forecast_data.get('lat')
+            lon = self.forecast_data.get('lon')
+        if lat is None or lon is None:
+            return
+
+        line_color = tuple(self.config.get('radar_line_color', [0, 130, 70]))
+        fill_color = tuple(self.config.get('radar_fill_color', [15, 25, 15]))
+
+        # Reuse existing fetcher if config hasn't changed
+        if hasattr(self, '_radar_fetcher'):
+            f = self._radar_fetcher
+            if (f.lat == lat and f.lon == lon and f.zoom == self.radar_zoom
+                    and f.line_color == line_color and f.fill_color == fill_color):
+                return
+            self.logger.info("Radar config changed, recreating RadarFetcher")
+
+        from radar import RadarFetcher
+        self._radar_fetcher = RadarFetcher(
+            lat, lon, self.radar_zoom, self.cache_manager,
+            line_color=line_color, fill_color=fill_color,
+        )
+
     def _fetch_weather(self) -> None:
         """Fetch weather data from OpenWeatherMap API."""
         # Check cache first - use update_interval as max_age to respect configured refresh rate
@@ -353,6 +416,24 @@ class WeatherPlugin(BasePlugin):
             self.weather_data = cached_data.get('current')
             self.forecast_data = cached_data.get('forecast')
             if self.weather_data and self.forecast_data:
+                # Backfill sun/moon/alerts from forecast_data if missing from older cache
+                if 'sun' not in self.weather_data and 'current' in self.forecast_data:
+                    fc = self.forecast_data['current']
+                    self.weather_data['sun'] = {
+                        'sunrise': fc.get('sunrise'),
+                        'sunset': fc.get('sunset'),
+                    }
+                if 'moon' not in self.weather_data and 'daily' in self.forecast_data:
+                    d0 = self.forecast_data['daily'][0]
+                    self.weather_data['moon'] = {
+                        'phase': d0.get('moon_phase'),
+                        'moonrise': d0.get('moonrise'),
+                        'moonset': d0.get('moonset'),
+                    }
+                if 'alerts' not in self.weather_data:
+                    self.weather_data['alerts'] = self.forecast_data.get('alerts', [])
+                if 'timezone_offset' not in self.weather_data:
+                    self.weather_data['timezone_offset'] = self.forecast_data.get('timezone_offset', 0)
                 self._process_forecast_data(self.forecast_data)
                 self.logger.info("Using cached weather data")
                 return
@@ -380,8 +461,6 @@ class WeatherPlugin(BasePlugin):
             raise
         geo_data = response.json()
         
-        # Increment API counter for geocoding call
-        increment_api_counter('weather', 1)
         
         if not geo_data:
             self._last_error_hint = f"Unknown: {city}, {state}"
@@ -393,7 +472,7 @@ class WeatherPlugin(BasePlugin):
         lon = geo_data[0]['lon']
         
         # Get weather data using One Call API
-        one_call_url = f"https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude=minutely,alerts&appid={self.api_key}&units={self.units}"
+        one_call_url = f"https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude=minutely&appid={self.api_key}&units={self.units}"
 
         try:
             response = requests.get(one_call_url, timeout=10)
@@ -417,24 +496,40 @@ class WeatherPlugin(BasePlugin):
             raise
         one_call_data = response.json()
         
-        # Increment API counter for weather data call
-        increment_api_counter('weather', 1)
         
-        # Store current weather data
+        # Store current weather data (including previously-unused fields)
+        current = one_call_data['current']
+        daily_today = one_call_data['daily'][0]
         self.weather_data = {
             'main': {
-                'temp': one_call_data['current']['temp'],
-                'temp_max': one_call_data['daily'][0]['temp']['max'],
-                'temp_min': one_call_data['daily'][0]['temp']['min'],
-                'humidity': one_call_data['current']['humidity'],
-                'pressure': one_call_data['current']['pressure'],
-                'uvi': one_call_data['current'].get('uvi', 0)
+                'temp': current['temp'],
+                'temp_max': daily_today['temp']['max'],
+                'temp_min': daily_today['temp']['min'],
+                'humidity': current['humidity'],
+                'pressure': current['pressure'],
+                'uvi': current.get('uvi', 0),
+                'feels_like': current.get('feels_like'),
+                'dew_point': current.get('dew_point'),
+                'visibility': current.get('visibility'),  # meters
+                'clouds': current.get('clouds'),
             },
-            'weather': one_call_data['current']['weather'],
+            'weather': current['weather'],
             'wind': {
-                'speed': one_call_data['current']['wind_speed'],
-                'deg': one_call_data['current'].get('wind_deg', 0)
-            }
+                'speed': current['wind_speed'],
+                'deg': current.get('wind_deg', 0),
+                'gust': current.get('wind_gust'),
+            },
+            'sun': {
+                'sunrise': current.get('sunrise'),
+                'sunset': current.get('sunset'),
+            },
+            'moon': {
+                'phase': daily_today.get('moon_phase'),
+                'moonrise': daily_today.get('moonrise'),
+                'moonset': daily_today.get('moonset'),
+            },
+            'alerts': one_call_data.get('alerts', []),
+            'timezone_offset': one_call_data.get('timezone_offset', 0),
         }
         
         # Store forecast data
@@ -559,11 +654,13 @@ class WeatherPlugin(BasePlugin):
             self._display_hourly_forecast()
         elif current_mode == 'daily_forecast' and self.show_daily:
             self._display_daily_forecast()
+        elif current_mode == 'almanac' and self.show_almanac:
+            self._display_almanac()
+        elif current_mode == 'radar' and self.show_radar:
+            self._display_radar()
         elif current_mode == 'weather' and self.show_current:
             self._display_current_weather()
         else:
-            # Fallback: show current weather if mode doesn't match
-            self.logger.warning(f"Mode {current_mode} not available, showing current weather")
             self._display_current_weather()
     
     def _on_mode_changed(self, new_mode: str) -> None:
@@ -662,33 +759,54 @@ class WeatherPlugin(BasePlugin):
             draw.text((high_low_x, high_low_y), high_low_text, font=high_low_font, fill=self.COLORS['dim'])
 
             # --- Bottom: Additional Metrics ---
-            section_width = width // 3
-            y_pos = layout['bottom_bar_y']
+            # Build list of enabled metric items, then distribute evenly across rows.
+            # Each item is (text, color). Rows fill from left to right, each item
+            # centered in its equal-width section (same pattern as original UV/H/W bar).
             font = self.display_manager.extra_small_font
+            extra_small_h = 7
 
-            # UV Index (Section 1)
-            uv_prefix = "UV:"
-            uv_value_text = f"{uv_index:.0f}"
-            prefix_width = draw.textlength(uv_prefix, font=font)
-            value_width = draw.textlength(uv_value_text, font=font)
-            total_width = prefix_width + value_width
-            start_x = (section_width - total_width) // 2
-            draw.text((start_x, y_pos), uv_prefix, font=font, fill=self.COLORS['dim'])
-            uv_color = self._get_uv_color(uv_index)
-            draw.text((start_x + prefix_width, y_pos), uv_value_text, font=font, fill=uv_color)
-
-            # Humidity (Section 2)
-            humidity_text = f"H:{humidity}%"
-            humidity_width = draw.textlength(humidity_text, font=font)
-            humidity_x = section_width + (section_width - humidity_width) // 2
-            draw.text((humidity_x, y_pos), humidity_text, font=font, fill=self.COLORS['dim'])
-
-            # Wind (Section 3)
+            # Gather all enabled bottom-bar items
+            feels_like = self.weather_data['main'].get('feels_like')
+            dew_point = self.weather_data['main'].get('dew_point')
+            visibility_m = self.weather_data['main'].get('visibility')
+            pressure = self.weather_data['main'].get('pressure')
             wind_dir = self._get_wind_direction(wind_deg)
-            wind_text = f"W:{wind_speed:.0f}{wind_dir}"
-            wind_width = draw.textlength(wind_text, font=font)
-            wind_x = (2 * section_width) + (section_width - wind_width) // 2
-            draw.text((wind_x, y_pos), wind_text, font=font, fill=self.COLORS['dim'])
+            wind_gust = self.weather_data['wind'].get('gust')
+
+            all_items = []  # list of (text, color)
+
+            # Core items (always shown)
+            uv_color = self._get_uv_color(uv_index)
+            all_items.append((f"UV:{uv_index:.0f}", uv_color))
+            all_items.append((f"H:{humidity}%", self.COLORS['dim']))
+            if wind_gust and wind_gust > wind_speed * 1.3:
+                all_items.append((f"W:{wind_speed:.0f}g{wind_gust:.0f}{wind_dir}", self.COLORS['dim']))
+            else:
+                all_items.append((f"W:{wind_speed:.0f}{wind_dir}", self.COLORS['dim']))
+
+            # Extra items — merged into same row (no degree symbol, font can't render it)
+            if self.show_feels_like and feels_like is not None:
+                all_items.append((f"FL:{int(feels_like)}", self.COLORS['dim']))
+            if self.show_dew_point and dew_point is not None:
+                all_items.append((f"Dew:{int(dew_point)}", self.COLORS['dim']))
+            if self.show_visibility and visibility_m is not None:
+                vis_val = visibility_m / 1609.34 if self.units == 'imperial' else visibility_m / 1000
+                vis_u = "mi" if self.units == 'imperial' else "km"
+                all_items.append((f"Vis:{vis_val:.0f}{vis_u}", self.COLORS['dim']))
+            if self.show_pressure and pressure is not None:
+                if self.units == 'imperial':
+                    pv = pressure * 0.02953
+                    all_items.append((f"P:{pv:.2f}\"", self.COLORS['dim']))
+                else:
+                    all_items.append((f"P:{int(pressure)}hPa", self.COLORS['dim']))
+
+            # Single bottom bar with all items
+            if all_items:
+                sec_w = width // len(all_items)
+                for i, (text, color) in enumerate(all_items):
+                    tw = draw.textlength(text, font=font)
+                    x = i * sec_w + (sec_w - tw) // 2
+                    draw.text((max(0, x), layout['bottom_bar_y']), text, font=font, fill=color)
 
             return img
         except Exception as e:
@@ -908,6 +1026,226 @@ class WeatherPlugin(BasePlugin):
         except Exception as e:
             self.logger.error(f"Error displaying daily forecast: {e}")
     
+    # --- Almanac Display Mode ---
+
+    def _get_moon_phase_name(self, phase: float) -> str:
+        """Convert moon phase float (0-1) to a name."""
+        if phase is None:
+            return "---"
+        if phase == 0:
+            return "New Moon"
+        elif phase < 0.25:
+            return "Wax Crescent"
+        elif phase == 0.25:
+            return "First Quarter"
+        elif phase < 0.5:
+            return "Wax Gibbous"
+        elif phase == 0.5:
+            return "Full Moon"
+        elif phase < 0.75:
+            return "Wan Gibbous"
+        elif phase == 0.75:
+            return "Last Quarter"
+        else:
+            return "Wan Crescent"
+
+    def _get_moon_icon_code(self, phase: float) -> str:
+        """Map moon phase float (0-1) to one of 8 icon filename stems."""
+        if phase is None:
+            return "moon-new"
+        # 8 phases, each covering ~0.0625 of the cycle centered on the named phase
+        if phase < 0.0625:
+            return "moon-new"
+        elif phase < 0.1875:
+            return "moon-waxing-crescent"
+        elif phase < 0.3125:
+            return "moon-first-quarter"
+        elif phase < 0.4375:
+            return "moon-waxing-gibbous"
+        elif phase < 0.5625:
+            return "moon-full"
+        elif phase < 0.6875:
+            return "moon-waning-gibbous"
+        elif phase < 0.8125:
+            return "moon-last-quarter"
+        elif phase < 0.9375:
+            return "moon-waning-crescent"
+        else:
+            return "moon-new"
+
+    def _format_unix_time(self, ts, offset=0):
+        """Format a unix timestamp to local time string like '6:42a'."""
+        if not ts:
+            return "---"
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromtimestamp(ts, tz=timezone(timedelta(seconds=offset)))
+        h = dt.hour
+        m = dt.minute
+        ampm = "a" if h < 12 else "p"
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d}{ampm}"
+
+    def _display_almanac(self) -> None:
+        """Display almanac: sunrise/sunset, moon phase, day length."""
+        try:
+            width = self.display_manager.matrix.width
+            height = self.display_manager.matrix.height
+            img = Image.new('RGB', (width, height), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            font = self.display_manager.small_font          # 8px - main text
+            font_sm = self.display_manager.extra_small_font  # 6px - secondary
+            font_h = 9   # line height for small_font
+            font_sm_h = 7  # line height for extra_small_font
+            tz_offset = self.weather_data.get('timezone_offset', 0) if self.weather_data else 0
+            sun = self.weather_data.get('sun', {}) if self.weather_data else {}
+            moon = self.weather_data.get('moon', {}) if self.weather_data else {}
+
+            sunrise_ts = sun.get('sunrise')
+            sunset_ts = sun.get('sunset')
+            moonrise_ts = moon.get('moonrise')
+            moonset_ts = moon.get('moonset')
+            moon_phase = moon.get('phase')
+
+            sunrise = self._format_unix_time(sunrise_ts, tz_offset)
+            sunset = self._format_unix_time(sunset_ts, tz_offset)
+            moonrise = self._format_unix_time(moonrise_ts, tz_offset)
+            moonset = self._format_unix_time(moonset_ts, tz_offset)
+            phase_name = self._get_moon_phase_name(moon_phase)
+
+            # Day length
+            day_len = ""
+            if sunrise_ts and sunset_ts:
+                diff = sunset_ts - sunrise_ts
+                dh = int(diff // 3600)
+                dm = int((diff % 3600) // 60)
+                day_len = f"{dh}h{dm}m"
+
+            # Moon phase icon (left side) — use most of the height
+            moon_icon_code = self._get_moon_icon_code(moon_phase)
+            icon_size = height - 6
+
+            try:
+                moon_icon = WeatherIcons.load_weather_icon(moon_icon_code, icon_size)
+                if moon_icon:
+                    iy = (height - moon_icon.height) // 2
+                    img.paste(moon_icon, (2, iy), moon_icon)
+            except Exception:
+                pass
+
+            # Text area starts after the icon
+            text_x = icon_size + 8
+            text_w = width - text_x - 2
+
+            # Row 1: Phase name (prominent)
+            draw.text((text_x, 2), phase_name, font=font, fill=(200, 200, 255))
+            if moon_phase is not None:
+                pct = f"{int(moon_phase * 100)}%"
+                pct_w = draw.textlength(pct, font=font)
+                draw.text((width - pct_w - 2, 2), pct, font=font, fill=(140, 140, 180))
+
+            # Row 2: Sunrise / Sunset
+            y2 = 2 + font_h + 2
+            draw.text((text_x, y2), f"Rise {sunrise}", font=font_sm, fill=(255, 200, 0))
+            set_text = f"Set {sunset}"
+            set_w = draw.textlength(set_text, font=font_sm)
+            draw.text((width - set_w - 2, y2), set_text, font=font_sm, fill=(255, 120, 50))
+
+            # Row 3: Moonrise / Moonset
+            y3 = y2 + font_sm_h + 2
+            draw.text((text_x, y3), f"MR {moonrise}", font=font_sm, fill=(180, 180, 220))
+            ms_text = f"MS {moonset}"
+            ms_w = draw.textlength(ms_text, font=font_sm)
+            draw.text((width - ms_w - 2, y3), ms_text, font=font_sm, fill=(140, 140, 180))
+
+            # Row 4: Day length
+            y4 = y3 + font_sm_h + 2
+            if day_len:
+                draw.text((text_x, y4), f"Day {day_len}", font=font_sm, fill=self.COLORS['dim'])
+
+            self.display_manager.image = img
+            self.display_manager.update_display()
+        except Exception as e:
+            self.logger.exception("Error displaying almanac")
+
+    # --- Radar Display Mode ---
+
+    def _display_radar(self) -> None:
+        """Display animated radar imagery composited over map background.
+
+        Radar tile fetching is handled by _update_radar() in the update loop.
+        This method only composites and displays cached frames.
+        """
+        try:
+            self._ensure_radar_fetcher()
+            if not hasattr(self, '_radar_fetcher'):
+                self._display_no_data()
+                return
+
+            width = self.display_manager.matrix.width
+            height = self.display_manager.matrix.height
+            img = self._radar_fetcher.get_radar_image(width, height)
+
+            if img:
+                self.display_manager.image = img
+                self.display_manager.update_display()
+            else:
+                self._display_no_data()
+        except Exception as e:
+            self.logger.exception("Error displaying radar")
+            self._display_no_data()
+
+    # --- Weather Alerts Display ---
+
+    def _display_alerts(self) -> None:
+        """Display active weather alerts if any."""
+        try:
+            alerts = []
+            if self.weather_data:
+                alerts = self.weather_data.get('alerts', [])
+            if not alerts:
+                return  # No alerts — skip silently
+
+            width = self.display_manager.matrix.width
+            height = self.display_manager.matrix.height
+            img = Image.new('RGB', (width, height), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            font = self.display_manager.extra_small_font
+            font_h = 7
+            alert = alerts[0]  # Show first alert
+
+            event = alert.get('event', 'Weather Alert')
+            sender = alert.get('sender_name', '')
+            description = alert.get('description', '')
+
+            y = 1
+            # Row 1: Alert type in red/yellow
+            draw.text((2, y), event[:30], font=font, fill=(255, 80, 0))
+            y += font_h + 1
+
+            # Row 2: Sender
+            if sender:
+                draw.text((2, y), sender[:30], font=font, fill=(200, 200, 200))
+                y += font_h + 1
+
+            # Row 3+: Description (truncated to fit)
+            if description:
+                desc_short = description.replace('\n', ' ')[:60]
+                draw.text((2, y), desc_short, font=font, fill=(180, 180, 180))
+
+            self.display_manager.image = img
+            self.display_manager.update_display()
+        except Exception as e:
+            self.logger.exception("Error displaying alerts")
+
+    def has_live_content(self) -> bool:
+        """Return True if there are active severe weather alerts."""
+        if not self.show_alerts or not self.weather_data:
+            return False
+        alerts = self.weather_data.get('alerts', [])
+        return len(alerts) > 0
+
     def get_vegas_content(self):
         """Return images for all enabled weather display modes."""
         if not self.weather_data:
