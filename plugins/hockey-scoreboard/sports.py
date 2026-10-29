@@ -546,6 +546,10 @@ class SportsCore(SportsCardOptionsMixin, SportsGameRulesMixin, SportsFetchMixin,
     #: the classic box is 1.5x the panel.
     _LOGO_FIT_SCALE: ClassVar[float] = 1 / 1.5
 
+    #: The fit value the schema and README tell users to type. At or below it
+    #: a logo is held to the panel height outright.
+    _LOGO_FIT_SETTING: ClassVar[float] = 0.67
+
     def _logo_edge_bleed(self, element: str, base: int) -> int:
         """How far a scorebug logo is pushed outward, off its edge of the panel.
 
@@ -963,7 +967,7 @@ class SportsCore(SportsCardOptionsMixin, SportsGameRulesMixin, SportsFetchMixin,
         # A team is home in one game and away in the next, and the two sides
         # can be scaled differently, so a scaled logo gets its own entry. An
         # unscaled one keeps the bare abbreviation it has always been cached on.
-        cache_key = team_abbrev if scale == 1.0 else f"{team_abbrev}@{scale:g}"
+        cache_key = team_abbrev if scale == 1.0 else f"{team_abbrev}@{scale!r}"
         if cache_key in self._logo_cache:
             self.logger.debug(f"Using cached logo for {cache_key}")
             if hasattr(self._logo_cache, "move_to_end"):
@@ -1028,6 +1032,11 @@ class SportsCore(SportsCardOptionsMixin, SportsGameRulesMixin, SportsFetchMixin,
             # size and _LOGO_FIT_SCALE is a logo exactly the panel's height.
             max_height = max(1, int(self.display_height * 1.5 * scale))
             max_width = max(1, int(self.display_width * 1.5 * scale))
+            if scale <= self._LOGO_FIT_SETTING:
+                # "Fits the panel" has to hold on every panel: 0.67 is a
+                # shade over 1/1.5, and on a panel 200+ px tall that shade is
+                # a whole pixel off the bottom.
+                max_height = min(max_height, self.display_height)
             centre_gap = self._scorebug_centre_gap()
             if centre_gap > 0:
                 # Only once the score has grown into the middle -- see

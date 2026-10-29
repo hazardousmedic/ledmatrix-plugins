@@ -10,6 +10,7 @@ panel height, so a logo scaled to fit is drawn whole.
 1. Unset (or 1.0) sizes the logo exactly as before, on the same cache key.
 2. A scale shrinks the box, and a scaled logo is cached apart from the
    unscaled one, so a team drawn at two sizes does not get the first size twice.
+   0.67, the value users are told fits, fits on any panel height.
 3. The edge bleed is the full base at 1.0 and above, 0 at the fit scale and
    below, and in between in between.
 4. The schema declares the scale on both logos, with the default the code uses.
@@ -94,6 +95,19 @@ def main():
         check("a scaled logo is cached apart from the unscaled one",
               set(fit._logo_cache) == {"TOR", "TOR@0.67"}, list(fit._logo_cache))
 
+        tall = make_core({"home_logo": {"scale": 0.67}}, width=400, height=200)
+        logo = tall._load_and_resize_logo("1", "TOR", logo_path, None,
+                                          element="home_logo")
+        check("scale 0.67 fits on a 200-tall panel too (no 1px overhang)",
+              logo is not None and logo.size[1] <= 200, logo and logo.size)
+
+        near = make_core({"home_logo": {"scale": 0.4999999},
+                          "away_logo": {"scale": 0.5000001}})
+        near._load_and_resize_logo("1", "TOR", logo_path, None, element="home_logo")
+        near._load_and_resize_logo("1", "TOR", logo_path, None, element="away_logo")
+        check("scales that differ only past six digits keep separate cache keys",
+              len(near._logo_cache) == 2, list(near._logo_cache))
+
         bad = make_core({"home_logo": {"scale": "big"}})
         logo = bad._load_and_resize_logo("1", "TOR", logo_path, None,
                                          element="home_logo")
@@ -107,6 +121,7 @@ def main():
     check("full bleed at 1.0", bleed(1.0) == 10, bleed(1.0))
     check("full bleed above 1.0", bleed(1.5) == 10, bleed(1.5))
     check("no bleed once the logo fits the panel", bleed(0.6) == 0, bleed(0.6))
+    check("no bleed at the advertised fit value", bleed(0.67) == 0, bleed(0.67))
     check("part bleed in between", 0 < bleed(0.85) < 10, bleed(0.85))
     check("unset scale bleeds the classic amount",
           make_core()._logo_edge_bleed("away_logo", 2) == 2)
